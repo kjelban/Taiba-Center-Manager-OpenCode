@@ -1,0 +1,10 @@
+{
+  "name": "Taiba Center Manager",
+  "description": "نظام متكامل لإدارة متجر ملابس الأطفال (طيبة سنتر) يشمل المخزون، المبيعات، المشتريات، والتقارير المالية والذكاء الاصطناعي.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

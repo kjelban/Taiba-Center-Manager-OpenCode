@@ -1,0 +1,185 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Store inventory product",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "barcode": { "type": "string" },
+        "categoryId": { "type": "string" },
+        "categoryName": { "type": "string" },
+        "seasonId": { "type": "string" },
+        "seasonName": { "type": "string" },
+        "color": { "type": "string" },
+        "size": { "type": "string" },
+        "costPrice": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "stock": { "type": "number" },
+        "minStock": { "type": "number" },
+        "supplierId": { "type": "string" },
+        "supplierName": { "type": "string" }
+      },
+      "required": ["id", "name", "costPrice", "sellingPrice", "stock"]
+    },
+    "SaleItem": {
+      "title": "Sale Item",
+      "description": "Item within a sale",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "quantity": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "costPrice": { "type": "number" },
+        "size": { "type": "string" },
+        "color": { "type": "string" }
+      },
+      "required": ["id", "name", "quantity", "sellingPrice", "costPrice"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "A sale transaction",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["sale", "return"] },
+        "date": { "type": "string", "format": "date-time" },
+        "items": { "type": "array" },
+        "totalAmount": { "type": "number" },
+        "profit": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["cash", "card", "debt", "bank_transfer"] },
+        "createdBy": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "originalSaleId": { "type": "string" },
+        "isPaid": { "type": "boolean" },
+        "dueDate": { "type": "string", "format": "date-time" },
+        "paidAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "type", "date", "items", "totalAmount", "profit", "paymentMethod", "createdBy", "isPaid"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Store expense",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "description": { "type": "string" },
+        "amount": { "type": "number" },
+        "date": { "type": "string", "format": "date-time" },
+        "type": { "type": "string" }
+      },
+      "required": ["id", "description", "amount", "date", "type"]
+    },
+    "Employee": {
+      "title": "Employee",
+      "description": "Store employee",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "type": { "type": "string", "enum": ["full_time", "part_time"] },
+        "salary": { "type": "number" },
+        "permissions": { "type": "array" },
+        "password": { "type": "string" }
+      },
+      "required": ["id", "name", "role", "type", "salary", "permissions"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Store customer",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "totalPurchases": { "type": "number" },
+        "totalDebt": { "type": "number" },
+        "lastPurchaseDate": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Store supplier",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "company": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "Attendance": {
+      "title": "Attendance",
+      "description": "Employee attendance record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "employeeId": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "checkInTime": { "type": "string", "format": "date-time" },
+        "checkOutTime": { "type": "string", "format": "date-time" },
+        "durationMinutes": { "type": "number" }
+      },
+      "required": ["id", "employeeId", "employeeName", "date", "checkInTime"]
+    },
+    "Metadata": {
+      "title": "Metadata",
+      "description": "System metadata",
+      "type": "object",
+      "properties": {
+        "migrated": { "type": "boolean" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "items": { "type": "array" }
+      }
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Inventory products"
+    },
+    "/sales/{saleId}": {
+      "schema": { "$ref": "#/entities/Sale" },
+      "description": "Sale transactions"
+    },
+    "/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/Expense" },
+      "description": "Store expenses"
+    },
+    "/employees/{employeeId}": {
+      "schema": { "$ref": "#/entities/Employee" },
+      "description": "Store employees"
+    },
+    "/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/Customer" },
+      "description": "Store customers"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/Supplier" },
+      "description": "Store suppliers"
+    },
+    "/attendance/{attendanceId}": {
+      "schema": { "$ref": "#/entities/Attendance" },
+      "description": "Employee attendance records"
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Metadata" },
+      "description": "Product categories list"
+    },
+    "/seasons/{seasonId}": {
+      "schema": { "$ref": "#/entities/Metadata" },
+      "description": "Product seasons list"
+    },
+    "/metadata/{metadataId}": {
+      "schema": { "$ref": "#/entities/Metadata" },
+      "description": "System metadata (like migration status)"
+    }
+  }
+}

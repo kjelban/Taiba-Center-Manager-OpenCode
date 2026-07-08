@@ -1,0 +1,183 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasAll(['id', 'name', 'costPrice', 'sellingPrice', 'stock']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+        data.costPrice is number && data.costPrice >= 0 &&
+        data.sellingPrice is number && data.sellingPrice >= 0 &&
+        data.stock is number && data.stock >= 0 &&
+        (data.get('barcode', '') is string) && (data.get('barcode', '').size() <= 100) &&
+        (data.get('categoryId', '') is string) && (data.get('categoryId', '').size() <= 128) &&
+        (data.get('categoryName', '') is string) && (data.get('categoryName', '').size() <= 100) &&
+        (data.get('seasonId', '') is string) && (data.get('seasonId', '').size() <= 128) &&
+        (data.get('seasonName', '') is string) && (data.get('seasonName', '').size() <= 100) &&
+        (data.get('color', '') is string) && (data.get('color', '').size() <= 50) &&
+        (data.get('size', '') is string) && (data.get('size', '').size() <= 50) &&
+        (data.get('minStock', 0) is number) && (data.get('minStock', 0) >= 0) &&
+        (data.get('supplierId', '') is string) && (data.get('supplierId', '').size() <= 128) &&
+        (data.get('supplierName', '') is string) && (data.get('supplierName', '').size() <= 100);
+    }
+
+    function isValidSale(data) {
+      return data.keys().hasAll(['id', 'type', 'date', 'items', 'totalAmount', 'profit', 'paymentMethod', 'createdBy', 'isPaid']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.type is string && data.type.size() <= 20 &&
+        data.date is string && data.date.size() <= 50 &&
+        data.items is list && data.items.size() >= 0 && data.items.size() <= 500 &&
+        data.totalAmount is number &&
+        data.profit is number &&
+        data.paymentMethod is string && data.paymentMethod.size() <= 50 &&
+        data.createdBy is string && data.createdBy.size() <= 100 &&
+        data.isPaid is bool &&
+        (data.get('customerId', '') is string) && (data.get('customerId', '').size() <= 128) &&
+        (data.get('customerName', '') is string) && (data.get('customerName', '').size() <= 100) &&
+        (data.get('originalSaleId', '') is string) && (data.get('originalSaleId', '').size() <= 128) &&
+        (data.get('dueDate', '') is string) && (data.get('dueDate', '').size() <= 50) &&
+        (data.get('paidAt', '') is string) && (data.get('paidAt', '').size() <= 50);
+    }
+
+    function isValidExpense(data) {
+      return data.keys().hasAll(['id', 'description', 'amount', 'date', 'type']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.description is string && data.description.size() <= 500 &&
+        data.amount is number && data.amount > 0 &&
+        data.date is string && data.date.size() <= 50 &&
+        data.type is string && data.type.size() <= 100;
+    }
+
+    function isValidEmployee(data) {
+      return data.keys().hasAll(['id', 'name', 'email', 'role', 'type', 'salary', 'permissions']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+        data.email is string && data.email.size() > 0 && data.email.size() <= 150 &&
+        data.role is string && data.role.size() <= 100 &&
+        data.type is string && data.type.size() <= 50 &&
+        data.salary is number && data.salary >= 0 &&
+        data.permissions is list && data.permissions.size() >= 0 && data.permissions.size() <= 50 &&
+        (data.get('password', '') is string);
+    }
+
+    function isValidCustomer(data) {
+      return data.keys().hasAll(['id', 'name']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+        (data.get('phone', '') is string) && (data.get('phone', '').size() <= 20) &&
+        (data.get('totalPurchases', 0) is number) &&
+        (data.get('totalDebt', 0) is number) &&
+        (data.get('lastPurchaseDate', '') is string) && (data.get('lastPurchaseDate', '').size() <= 50);
+    }
+
+    function isValidSupplier(data) {
+       return data.keys().hasAll(['id', 'name']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+        (data.get('phone', '') is string) && (data.get('phone', '').size() <= 20) &&
+        (data.get('company', '') is string) && (data.get('company', '').size() <= 100);
+    }
+    
+    function isValidAttendance(data) {
+      return data.keys().hasAll(['id', 'employeeId', 'employeeName', 'date', 'checkInTime']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.employeeId is string && data.employeeId.size() <= 128 &&
+        data.employeeName is string && data.employeeName.size() <= 100 &&
+        data.date is string && data.date.size() <= 50 &&
+        data.checkInTime is string && data.checkInTime.size() <= 50 &&
+        (data.get('checkOutTime', '') is string) && (data.get('checkOutTime', '').size() <= 50) &&
+        (data.get('durationMinutes', 0) is number);
+    }
+
+    function isValidMetadata(data) {
+      return (data.get('migrated', false) is bool) &&
+             (data.get('timestamp', '') is string) && (data.get('timestamp', '').size() <= 50) &&
+             (data.get('items', []) is list) && (data.get('items', []).size() <= 1000);
+    }
+
+    match /products/{productId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidProduct(incoming());
+      allow update: if isSignedIn() && isValidProduct(incoming());
+      allow delete: if isSignedIn();
+    }
+
+    match /sales/{saleId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidSale(incoming());
+      allow update: if isSignedIn() && isValidSale(incoming());
+      allow delete: if isSignedIn();
+    }
+
+    match /expenses/{expenseId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidExpense(incoming());
+      allow update: if isSignedIn() && isValidExpense(incoming());
+      allow delete: if isSignedIn();
+    }
+
+    match /employees/{employeeId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidEmployee(incoming());
+      allow update: if isSignedIn() && isValidEmployee(incoming());
+      allow delete: if isSignedIn();
+    }
+
+    match /customers/{customerId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidCustomer(incoming());
+      allow update: if isSignedIn() && isValidCustomer(incoming());
+      allow delete: if isSignedIn();
+    }
+
+    match /suppliers/{supplierId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidSupplier(incoming());
+      allow update: if isSignedIn() && isValidSupplier(incoming());
+      allow delete: if isSignedIn();
+    }
+
+    match /attendance/{attendanceId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidAttendance(incoming());
+      allow update: if isSignedIn() && isValidAttendance(incoming());
+      allow delete: if isSignedIn();
+    }
+
+    match /categories/{categoryId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isSignedIn();
+      allow delete: if isSignedIn();
+    }
+
+    match /seasons/{seasonId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isSignedIn();
+      allow delete: if isSignedIn();
+    }
+
+    match /metadata/{metadataId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidMetadata(incoming());
+      allow update: if isSignedIn() && isValidMetadata(incoming());
+      allow delete: if isSignedIn();
+    }
+  }
+}
