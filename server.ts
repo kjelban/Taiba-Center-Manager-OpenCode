@@ -8,7 +8,7 @@ import fs from "fs";
 async function startServer() {
   if (!process.env.NODE_ENV) process.env.NODE_ENV = 'production';
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   // Security Headers
   app.use(helmet({
