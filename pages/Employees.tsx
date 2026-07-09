@@ -92,14 +92,6 @@ const Employees: React.FC = () => {
         }
         
         if (!editingId) {
-            // Create Firebase Auth user using a secondary app to avoid signing out the admin
-            const { initializeApp } = await import('firebase/app');
-            const { getAuth, createUserWithEmailAndPassword } = await import('firebase/auth');
-            const firebaseConfig = (await import('../firebase-applet-config.json')).default;
-            
-            const secondaryApp = initializeApp(firebaseConfig, 'SecondaryApp');
-            const secondaryAuth = getAuth(secondaryApp);
-            
             const password = (formData as any).password;
             if (!password || password.length < 6) {
                 alert('يرجى إدخال كلمة مرور مكونة من 6 أحرف على الأقل.');
@@ -110,10 +102,7 @@ const Employees: React.FC = () => {
                 return;
             }
             
-            const userCredential = await createUserWithEmailAndPassword(secondaryAuth, formData.email, password);
-            authId = userCredential.user.uid;
-            
-            await secondaryAuth.signOut();
+            authId = crypto.randomUUID();
         }
 
         const employeeToSave: Employee = {
