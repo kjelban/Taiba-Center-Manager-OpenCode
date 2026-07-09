@@ -6,6 +6,7 @@ import helmet from "helmet";
 import fs from "fs";
 
 async function startServer() {
+  if (!process.env.NODE_ENV) process.env.NODE_ENV = 'production';
   const app = express();
   const PORT = 3000;
 
@@ -36,11 +37,18 @@ async function startServer() {
     return aiClient;
   }
 
-  // Load Firebase Config for Auth
+  // Load Firebase Config for Auth (from env var or file)
   let firebaseConfig: any = null;
   try {
-      const configStr = fs.readFileSync(path.join(process.cwd(), 'firebase-applet-config.json'), 'utf8');
-      firebaseConfig = JSON.parse(configStr);
+      const envConfig = process.env.FIREBASE_APPLET_CONFIG;
+      if (envConfig) {
+          firebaseConfig = JSON.parse(envConfig);
+          console.log("Firebase config loaded from environment variable.");
+      } else {
+          const configStr = fs.readFileSync(path.join(process.cwd(), 'firebase-applet-config.json'), 'utf8');
+          firebaseConfig = JSON.parse(configStr);
+          console.log("Firebase config loaded from file.");
+      }
   } catch (e) {
       console.warn("Failed to load firebase config, authentication verification will fail.");
   }
@@ -95,7 +103,7 @@ async function startServer() {
 
       const prompt = `أنا أدير متجر ملابس أطفال (طيبة سنتر).\nلدي منتج: ${safeProductName}.\nسعر التكلفة: ${costPrice} دينار.\nالموسم: ${safeSeason}.\n\nاقترح سعر بيع مناسب يحقق ربح جيد ومنافس.\nاشرح باختصار لماذا اخترت هذا السعر واذكر نسبة الربح المقترحة.\nاجعل الإجابة قصيرة ومباشرة باللغة العربية.`;
       
-      const response = await ai.models.generateContent({ model: "gemini-3.5-flash", contents: prompt });
+      const response = await ai.models.generateContent({ model: "gemini-1.5-flash", contents: prompt });
       res.json({ suggestion: response.text || "لم يتم استلام رد" });
     } catch (error: any) {
       console.error("Suggest Price Error:", error);
@@ -116,7 +124,7 @@ async function startServer() {
 بيانات المبيعات: ${salesSummary}
 بيانات المنتجات: ${productsSummary}`;
 
-      const response = await ai.models.generateContent({ model: "gemini-3.5-flash", contents: prompt });
+      const response = await ai.models.generateContent({ model: "gemini-1.5-flash", contents: prompt });
       res.json({ analysis: response.text || "لا توجد نصائح" });
     } catch (error: any) {
       res.status(500).json({ error: "خطأ بالتحليل" });

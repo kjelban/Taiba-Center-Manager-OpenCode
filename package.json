@@ -3,10 +3,13 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "NODE_ENV=production node dist/server.cjs"
+    "start": "node dist/server.cjs"
   },
   "dependencies": {
     "@google/genai": "^1.38.0",
@@ -27,11 +30,13 @@
     "@tailwindcss/vite": "^4.3.2",
     "@types/express": "^5.0.6",
     "@types/node": "^22.14.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.0.0",
     "esbuild": "^0.28.1",
     "tailwindcss": "^4.3.2",
     "tsx": "^4.22.4",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^6.4.3"
   }
 }

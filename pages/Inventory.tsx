@@ -65,7 +65,7 @@ const Inventory: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    const productId = editingProduct ? editingProduct.id : Date.now().toString();
+    const productId = editingProduct ? editingProduct.id : crypto.randomUUID();
     const productToSave: Product = {
         id: productId,
         name: formData.name!,
@@ -83,7 +83,6 @@ const Inventory: React.FC = () => {
 
     await DataService.saveProduct(productToSave);
     setIsModalOpen(false);
-    loadProducts();
   };
 
   const getAiPriceSuggestion = async () => {

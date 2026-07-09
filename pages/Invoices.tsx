@@ -34,7 +34,6 @@ const Invoices: React.FC<InvoicesProps> = ({ currentUser, onEditInvoice }) => {
     if (!canModify) return;
     if (window.confirm('تحذير: الحذف النهائي سيلغي الفاتورة ويعيد المخزون. هل أنت متأكد؟')) {
       await DataService.deleteSale(id);
-      loadSales();
       if (selectedSale?.id === id) setSelectedSale(null);
     }
   };
@@ -44,7 +43,6 @@ const Invoices: React.FC<InvoicesProps> = ({ currentUser, onEditInvoice }) => {
     
     if (window.confirm('هل تريد استرجاع هذه الفاتورة بالكامل؟ سيتم إعادة البضاعة للمخزون وتسجيل عملية مرتجع.')) {
         await DataService.processReturn(sale, currentUser?.name || 'مجهول');
-        loadSales();
         setSelectedSale(null);
         alert('تمت عملية الاسترجاع بنجاح');
     }
@@ -53,7 +51,6 @@ const Invoices: React.FC<InvoicesProps> = ({ currentUser, onEditInvoice }) => {
   const handleSettleDebt = async (sale: Sale) => {
     if (window.confirm(`هل تريد تأكيد سداد مبلغ ${sale.totalAmount} د.ل للعميل ${sale.customerName}؟`)) {
         await DataService.settleDebt(sale.id);
-        loadSales();
         setSelectedSale(null);
         alert("تم تسديد الدين بنجاح");
     }
@@ -245,7 +242,7 @@ const Invoices: React.FC<InvoicesProps> = ({ currentUser, onEditInvoice }) => {
                         <RotateCcw size={18} /> استرجاع الفاتورة
                     </button>
                 )}
-                <button onClick={() => handlePrint(selectedSale)} className="px-4 py-2 bg-slate-800 text-white rounded-lg flex items-center gap-2">
+                <button onClick={() => printReceipt(selectedSale)} className="px-4 py-2 bg-slate-800 text-white rounded-lg flex items-center gap-2">
                     <Printer size={18} /> طباعة
                 </button>
                 <button onClick={() => setSelectedSale(null)} className="px-4 py-2 bg-white border border-slate-300 rounded-lg">إغلاق</button>

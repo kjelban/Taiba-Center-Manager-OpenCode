@@ -38,7 +38,7 @@ const Customers: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    const id = editingCustomer ? editingCustomer.id : Date.now().toString();
+    const id = editingCustomer ? editingCustomer.id : crypto.randomUUID();
     const customerToSave: Customer = {
         id: id,
         name: formData.name!,

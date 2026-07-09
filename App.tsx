@@ -1,16 +1,18 @@
 
-import React, { useState, useEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect, Suspense, lazy, useCallback } from 'react';
 import Sidebar from './components/Sidebar';
 import UserLogin from './components/UserLogin';
-import { Check } from 'lucide-react';
 import Header from './components/layout/Header';
 import LogoutModal from './components/modals/LogoutModal';
 import DebtAlertModal from './components/modals/DebtAlertModal';
+import ErrorBoundary from './components/ErrorBoundary';
 import { Employee, Attendance, Sale } from './types';
 import { DataService } from './services/dataService';
+import { EmployeeService, AttendanceService } from './services/employeeService';
 
-// Lazy loading pages for code splitting
-const Dashboard = lazy(() => import('./pages/Dashboard'));
+// Directly import Dashboard (no lazy - it's the initial page after login)
+import Dashboard from './pages/Dashboard';
+// Lazy loading for other pages
 const Inventory = lazy(() => import('./pages/Inventory'));
 const POS = lazy(() => import('./pages/POS'));
 const Reports = lazy(() => import('./pages/Reports'));
@@ -23,17 +25,34 @@ const Customers = lazy(() => import('./pages/Customers'));
 const App: React.FC = () => {
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   
-  // User Session State
-  const [currentUser, setCurrentUser] = useState<Employee | null>(() => {
-    const saved = localStorage.getItem('taiba_current_user');
-    return saved ? JSON.parse(saved) : null;
-  });
-  const [currentSession, setCurrentSession] = useState<Attendance | null>(() => {
-    const saved = localStorage.getItem('taiba_current_session');
-    return saved ? JSON.parse(saved) : null;
-  });
+  // User Session State - store only IDs in localStorage
+  const [currentUser, setCurrentUser] = useState<Employee | null>(null);
+  const [currentSession, setCurrentSession] = useState<Attendance | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Load user from stored ID on mount
+  useEffect(() => {
+    const loadUser = async () => {
+      const userId = localStorage.getItem('taiba_user_id');
+      const sessionData = localStorage.getItem('taiba_current_session');
+      if (userId) {
+        const employee = await EmployeeService.getEmployee(userId);
+        if (employee) {
+          setCurrentUser(employee);
+          if (sessionData) {
+            try { setCurrentSession(JSON.parse(sessionData)); } catch {}
+          }
+        } else {
+          localStorage.removeItem('taiba_user_id');
+          localStorage.removeItem('taiba_current_session');
+        }
+      }
+      setIsInitialLoading(false);
+    };
+    loadUser();
+  }, []);
 
   // Logout Modal State
   const [isLogoutModalOpen, setIsLogoutModalOpen] = useState(false);
@@ -125,17 +144,16 @@ const App: React.FC = () => {
   }, [currentUser, isDebtAlertOpen, snoozeUntil]);
 
 
-  const handleLogin = async (employee: Employee) => {
+  const handleLogin = useCallback(async (employee: Employee) => {
     try {
-        const session = await DataService.clockIn(employee);
+        const session = await AttendanceService.clockIn(employee);
         setCurrentUser(employee);
         setCurrentSession(session);
-        localStorage.setItem('taiba_current_user', JSON.stringify(employee));
+        localStorage.setItem('taiba_user_id', employee.id);
         if (session) {
             localStorage.setItem('taiba_current_session', JSON.stringify(session));
         }
         
-        // Set default page based on permissions
         if (employee.permissions.includes('dashboard')) {
             setCurrentPage('dashboard');
         } else if (employee.permissions.length > 0) {
@@ -145,15 +163,15 @@ const App: React.FC = () => {
         console.error("Login failed:", error);
         alert("فشل تسجيل الدخول. يرجى المحاولة مرة أخرى.");
     }
-  };
+  }, []);
 
-  const confirmLogout = async () => {
+  const confirmLogout = useCallback(async () => {
     const sessionId = currentSession?.id;
     setIsLogoutModalOpen(false);
     
     if (sessionId) {
         try {
-            await DataService.clockOut(sessionId);
+            await AttendanceService.clockOut(sessionId);
         } catch (e) {
             console.error("Clock-out error:", e);
         }
@@ -161,7 +179,7 @@ const App: React.FC = () => {
     
     try {
         localStorage.setItem("explicitlySignedOut", "true");
-        localStorage.removeItem('taiba_current_user');
+        localStorage.removeItem('taiba_user_id');
         localStorage.removeItem('taiba_current_session');
     } catch (e) {
         console.error("Signout error:", e);
@@ -171,19 +189,19 @@ const App: React.FC = () => {
     setCurrentSession(null);
     setCurrentPage('dashboard');
     setIsSidebarOpen(false); 
-  };
+  }, [currentSession?.id]);
 
-  const handleEditInvoice = (sale: Sale) => {
+  const handleEditInvoice = useCallback((sale: Sale) => {
     setInvoiceToEdit(sale);
     setCurrentPage('pos');
-  };
+  }, []);
 
-  const handleClearEdit = () => {
+  const handleClearEdit = useCallback(() => {
     setInvoiceToEdit(null);
     setCurrentPage('invoices'); 
-  };
+  }, []);
 
-  const toggleFullscreen = () => {
+  const toggleFullscreen = useCallback(() => {
       if (!document.fullscreenElement) {
           document.documentElement.requestFullscreen();
       } else {
@@ -191,86 +209,78 @@ const App: React.FC = () => {
               document.exitFullscreen();
           }
       }
-  };
+  }, []);
 
-  const handleReload = () => {
-      // Soft reset: clears user state to simulate a reload without triggering browser navigation errors (404)
+  const handleReload = useCallback(() => {
       setCurrentUser(null);
       setCurrentSession(null);
       setCurrentPage('dashboard');
       setIsSidebarOpen(false);
       setInvoiceToEdit(null);
       setIsDebtAlertOpen(false);
-  };
+  }, []);
+
+  const handleSettleDebtFromAlert = useCallback(async (saleId: string) => {
+    await DataService.settleDebt(saleId);
+    const remaining = overdueSales.filter(s => s.id !== saleId);
+    setOverdueSales(remaining);
+    if (remaining.length === 0) {
+        setIsDebtAlertOpen(false);
+    }
+  }, [overdueSales]);
+
+  const handleRescheduleDebt = useCallback(async (saleId: string, newDate: string) => {
+    if (!newDate) return;
+    await DataService.rescheduleDebt(saleId, newDate);
+    const remaining = overdueSales.filter(s => s.id !== saleId);
+    setOverdueSales(remaining);
+    setRescheduleId(null);
+    if (remaining.length === 0) {
+        setIsDebtAlertOpen(false);
+    }
+  }, [overdueSales]);
+
+  const handleOpenLogoutModal = useCallback(() => setIsLogoutModalOpen(true), []);
+
+  const handleSnooze = useCallback((dur: number) => {
+    setSnoozeDuration(dur);
+    setSnoozeUntil(Date.now() + (dur * 60 * 1000));
+    setIsDebtAlertOpen(false);
+  }, []);
 
   const renderPage = () => {
     if (currentUser && !currentUser.permissions.includes(currentPage) && currentPage !== 'settings') {
-        if (currentPage === 'settings' && currentUser.permissions.includes('settings')) {
-            return (
-                <Suspense fallback={<div className="flex items-center justify-center h-full p-10 text-slate-500">جاري التحميل...</div>}>
-                    <Settings />
-                </Suspense>
-            );
-        }
         return <div className="p-10 text-center text-slate-500">ليس لديك صلاحية للوصول لهذه الصفحة</div>;
     }
 
-    const PageContent = () => {
-        switch(currentPage) {
-          case 'dashboard': return <Dashboard />;
-          case 'inventory': return <Inventory />;
-          case 'pos': return <POS currentUser={currentUser} invoiceToEdit={invoiceToEdit} onClearEdit={handleClearEdit} />;
-          case 'reports': return <Reports />;
-          case 'expenses': return <Expenses />;
-          case 'employees': return <Employees />;
-          case 'customers': return <Customers />;
-          case 'invoices': return <Invoices currentUser={currentUser} onEditInvoice={handleEditInvoice} />;
-          default: return <Settings />; 
-        }
-    };
-
-    return (
-        <Suspense fallback={<div className="flex items-center justify-center h-full p-10 text-slate-500">جاري التحميل...</div>}>
-            <PageContent />
-        </Suspense>
-    );
+    switch(currentPage) {
+      case 'dashboard': return <Dashboard />;
+      case 'inventory': return <Inventory />;
+      case 'pos': return <POS currentUser={currentUser} invoiceToEdit={invoiceToEdit} onClearEdit={handleClearEdit} />;
+      case 'reports': return <Reports />;
+      case 'expenses': return <Expenses />;
+      case 'employees': return <Employees />;
+      case 'customers': return <Customers />;
+      case 'invoices': return <Invoices currentUser={currentUser} onEditInvoice={handleEditInvoice} />;
+      default: return <Settings />; 
+    }
   };
+
+  if (isInitialLoading) {
+    return (
+      <div className="fixed inset-0 bg-slate-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-white text-lg font-bold">طيبة سنتر</p>
+          <p className="text-slate-400 text-sm">جاري التحميل...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return <UserLogin onLogin={handleLogin} />;
   }
-
-
-
-  const handleSettleDebtFromAlert = async (saleId: string) => {
-    await DataService.settleDebt(saleId);
-    // Refresh list locally to avoid full re-fetch flicker
-    const remaining = overdueSales.filter(s => s.id !== saleId);
-    setOverdueSales(remaining);
-    if (remaining.length === 0) {
-        setIsDebtAlertOpen(false);
-    }
-  };
-
-  const handleRescheduleDebt = async (saleId: string, newDate: string) => {
-    if (!newDate) return;
-    await DataService.rescheduleDebt(saleId, newDate);
-    
-    // Remove from current alert list because it's no longer overdue (presumably rescheduled to future)
-    const remaining = overdueSales.filter(s => s.id !== saleId);
-    setOverdueSales(remaining);
-    setRescheduleId(null);
-
-    if (remaining.length === 0) {
-        setIsDebtAlertOpen(false);
-    }
-  };
-
-  const handleSnooze = () => {
-    // Set snooze time
-    setSnoozeUntil(Date.now() + (snoozeDuration * 60 * 1000));
-    setIsDebtAlertOpen(false);
-  };
 
   return (
     <div className="h-screen bg-slate-50 flex overflow-hidden" dir="rtl">
@@ -291,11 +301,15 @@ const App: React.FC = () => {
           isFullscreen={isFullscreen}
           toggleFullscreen={toggleFullscreen}
           onReload={handleReload}
-          onLogoutClick={() => setIsLogoutModalOpen(true)}
+          onLogoutClick={handleOpenLogoutModal}
         />
         
         <div className="flex-1 overflow-auto">
-            {renderPage()}
+          <ErrorBoundary>
+            <Suspense fallback={<div className="flex items-center justify-center h-full p-10 text-slate-500">جاري التحميل...</div>}>
+              {renderPage()}
+            </Suspense>
+          </ErrorBoundary>
         </div>
       </main>
 
@@ -310,11 +324,7 @@ const App: React.FC = () => {
         overdueSales={overdueSales}
         onSettleDebt={handleSettleDebtFromAlert}
         onRescheduleDebt={handleRescheduleDebt}
-        onSnooze={(dur) => {
-            setSnoozeDuration(dur);
-            setSnoozeUntil(Date.now() + (dur * 60 * 1000));
-            setIsDebtAlertOpen(false);
-        }}
+        onSnooze={handleSnooze}
       />
     </div>
   );

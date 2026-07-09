@@ -30,7 +30,7 @@ const Expenses: React.FC = () => {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     const newExpense: Expense = {
-      id: Date.now().toString(),
+      id: crypto.randomUUID(),
       category: formData.category || 'مصروفات عامة',
       amount: Number(formData.amount),
       description: formData.description!,

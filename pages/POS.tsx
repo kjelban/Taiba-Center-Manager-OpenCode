@@ -203,7 +203,7 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
         if (onClearEdit) onClearEdit();
     } else {
         const newSale: Sale = {
-            id: Date.now().toString(),
+            id: crypto.randomUUID(),
             type: SaleType.SALE,
             date: new Date().toISOString(),
             items: cart,

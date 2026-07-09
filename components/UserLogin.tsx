@@ -34,20 +34,21 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
     
     // Auto-create admin if no employees exist
     if (employees.length === 0) {
-        if (password !== 'admin123') {
-            setError('كلمة المرور الافتراضية للمدير هي admin123');
+        const defaultPassword = import.meta.env.VITE_DEFAULT_ADMIN_PASSWORD || 'admin123';
+        if (password !== defaultPassword) {
+            setError(`كلمة المرور الافتراضية للمدير هي ${defaultPassword}`);
             setLoading(false);
             return;
         }
         const admin: Employee = {
-            id: 'admin_1',
+            id: crypto.randomUUID(),
             name: 'المدير العام',
             email: 'admin@taiba.local',
             role: 'مدير',
             type: 'دوام كامل' as any,
             salary: 0,
             permissions: ['dashboard', 'pos', 'invoices', 'inventory', 'reports', 'expenses', 'employees', 'settings'],
-            password: 'admin123'
+            password: defaultPassword
         };
         try {
             await DataService.saveEmployee(admin);
@@ -91,7 +92,7 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
             
             {employees.length === 0 && !loading && (
                 <div className="w-full bg-blue-50 text-blue-800 p-4 rounded-xl mb-6 text-center text-sm border border-blue-100">
-                    جاري إنشاء حساب المدير الافتراضي تلقائياً عند الدخول... (كلمة المرور الافتراضية: admin123)
+                    جاري إنشاء حساب المدير الافتراضي تلقائياً عند الدخول... (كلمة المرور الافتراضية: {(import.meta as any).env.VITE_DEFAULT_ADMIN_PASSWORD || 'admin123'})
                 </div>
             )}
             
