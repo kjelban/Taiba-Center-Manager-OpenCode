@@ -14,7 +14,6 @@ dist-ssr
 
 # Environment & secrets
 .env
-firebase-applet-config.json
 
 # Editor directories and files
 .vscode/*
