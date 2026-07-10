@@ -40,7 +40,33 @@ export const AttendanceService = {
     return subscribeToCollection<Attendance>(COLLECTIONS.ATTENDANCE, callback);
   },
 
+  closeRecord: async (record: Attendance): Promise<void> => {
+    if (record.checkOutTime) return;
+    const now = new Date();
+    const diffMs = now.getTime() - new Date(record.checkInTime).getTime();
+    const diffMins = Math.round(diffMs / 60000);
+    record.checkOutTime = now.toISOString();
+    record.durationMinutes = diffMins;
+    await setData(COLLECTIONS.ATTENDANCE, record.id, record);
+  },
+
+  autoCloseOpenSessions: async (employeeId?: string): Promise<void> => {
+    try {
+      const allRecords = await AttendanceService.getAttendance();
+      const now = Date.now();
+      for (const record of allRecords) {
+        if (record.checkOutTime) continue;
+        if (employeeId && record.employeeId !== employeeId) continue;
+        const checkIn = new Date(record.checkInTime).getTime();
+        if ((now - checkIn) > 12 * 60 * 60 * 1000) {
+          await AttendanceService.closeRecord(record);
+        }
+      }
+    } catch { }
+  },
+
   clockIn: async (employee: Employee): Promise<Attendance> => {
+    await AttendanceService.autoCloseOpenSessions(employee.id);
     const now = new Date();
     const newRecord: Attendance = {
       id: crypto.randomUUID(),
@@ -48,6 +74,8 @@ export const AttendanceService = {
       employeeName: employee.name,
       date: now.toISOString().split('T')[0],
       checkInTime: now.toISOString(),
+      checkOutTime: null,
+      durationMinutes: null,
     };
     await setData(COLLECTIONS.ATTENDANCE, newRecord.id, newRecord);
     return newRecord;
@@ -57,11 +85,6 @@ export const AttendanceService = {
     const attSnap = await getDoc(doc(db, COLLECTIONS.ATTENDANCE, recordId));
     if (!attSnap.exists()) return;
     const record = attSnap.data() as Attendance;
-    const now = new Date();
-    const diffMs = now.getTime() - new Date(record.checkInTime).getTime();
-    const diffMins = Math.round(diffMs / 60000);
-    record.checkOutTime = now.toISOString();
-    record.durationMinutes = diffMins;
-    await setData(COLLECTIONS.ATTENDANCE, recordId, record);
+    await AttendanceService.closeRecord(record);
   },
 };

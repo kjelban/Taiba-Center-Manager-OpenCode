@@ -37,18 +37,38 @@ const App: React.FC = () => {
     const loadUser = async () => {
       const userId = localStorage.getItem('taiba_user_id');
       const sessionData = localStorage.getItem('taiba_current_session');
+      const explicitSignOut = localStorage.getItem('explicitlySignedOut');
+
       if (userId) {
         const employee = await EmployeeService.getEmployee(userId);
         if (employee) {
           setCurrentUser(employee);
-          if (sessionData) {
-            try { setCurrentSession(JSON.parse(sessionData)); } catch {}
+
+          // If previous session was still open, close it first
+          if (sessionData && !explicitSignOut) {
+            try {
+              const session = JSON.parse(sessionData);
+              if (!session.checkOutTime) {
+                await AttendanceService.clockOut(session.id);
+              }
+            } catch {}
           }
+          localStorage.removeItem('taiba_current_session');
+          localStorage.removeItem('explicitlySignedOut');
+
+          // Auto-create a new session so sales are tracked
+          try {
+            const newSession = await AttendanceService.clockIn(employee);
+            setCurrentSession(newSession);
+            localStorage.setItem('taiba_current_session', JSON.stringify(newSession));
+          } catch {}
         } else {
           localStorage.removeItem('taiba_user_id');
           localStorage.removeItem('taiba_current_session');
         }
       }
+      // Close any stale sessions across all employees
+      await AttendanceService.autoCloseOpenSessions();
       setIsInitialLoading(false);
     };
     loadUser();
@@ -94,6 +114,17 @@ const App: React.FC = () => {
       document.addEventListener('fullscreenchange', handleFsChange);
       return () => document.removeEventListener('fullscreenchange', handleFsChange);
   }, []);
+
+  // Auto clock-out on page close/refresh
+  useEffect(() => {
+    if (!currentSession?.id) return;
+    const handleBeforeUnload = () => {
+      const blob = new Blob([JSON.stringify({ id: currentSession.id })], { type: 'application/json' });
+      navigator.sendBeacon('/api/clockout', blob);
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [currentSession?.id]);
 
   // Persist Snooze Time change
   useEffect(() => {

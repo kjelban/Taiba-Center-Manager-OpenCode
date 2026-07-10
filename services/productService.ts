@@ -1,7 +1,7 @@
 import { Product } from '../types';
 import { db } from './firebase';
 import { doc, getDoc, writeBatch } from 'firebase/firestore';
-import { COLLECTIONS, getAll, setData, subscribeToCollection, sanitizeData } from './base';
+import { COLLECTIONS, getAll, setData, subscribeToCollection, sanitizeData, proxyBatchSet, handleFirestoreError, OperationType } from './base';
 
 export const ProductService = {
   getProducts: async (): Promise<Product[]> => {
@@ -17,7 +17,7 @@ export const ProductService = {
   },
 
   updateStock: async (items: {id: string, quantity: number}[], mode: 'increase' | 'decrease'): Promise<void> => {
-    const batch = writeBatch(db);
+    const writes: {collection: string; id: string; data: any}[] = [];
     for (const item of items) {
       const productRef = doc(db, COLLECTIONS.PRODUCTS, item.id);
       const productSnap = await getDoc(productRef);
@@ -25,9 +25,17 @@ export const ProductService = {
         const product = productSnap.data() as Product;
         if (mode === 'increase') product.stock += item.quantity;
         else product.stock = Math.max(0, product.stock - item.quantity);
-        batch.set(productRef, sanitizeData(product));
+        writes.push({ collection: COLLECTIONS.PRODUCTS, id: item.id, data: product });
       }
     }
-    await batch.commit();
+    const ok = await proxyBatchSet(writes);
+    if (ok) return;
+    try {
+      const batch = writeBatch(db);
+      for (const w of writes) batch.set(doc(db, w.collection, w.id), sanitizeData(w.data));
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, COLLECTIONS.PRODUCTS);
+    }
   },
 };

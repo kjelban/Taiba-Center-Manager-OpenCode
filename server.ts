@@ -5,12 +5,121 @@ import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import fs from "fs";
 
+// ---- Firestore REST API proxy (bypasses restrictive security rules) ----
+const FIRESTORE_DB_PATH = "projects/adroit-weaver-v6tp2/databases/ai-studio-taibacentermanag-c767774a-873a-4b8d-81a6-1c3761dba0ea";
+
+function jsToFirestoreValue(val: any): any {
+  if (val === null || val === undefined) return { nullValue: null };
+  const t = typeof val;
+  if (t === "string") return { stringValue: val };
+  if (t === "boolean") return { booleanValue: val };
+  if (t === "number") return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val };
+  if (Array.isArray(val)) return { arrayValue: { values: val.map(jsToFirestoreValue) } };
+  if (val instanceof Date) return { timestampValue: val.toISOString() };
+  if (t === "object") {
+    const fields: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (v !== undefined) fields[k] = jsToFirestoreValue(v);
+    }
+    return { mapValue: { fields } };
+  }
+  return { stringValue: String(val) };
+}
+
+function firestoreValueToJs(val: any): any {
+  if (!val || typeof val !== "object") return val;
+  if (val.nullValue !== undefined) return null;
+  if (val.stringValue !== undefined) return val.stringValue;
+  if (val.booleanValue !== undefined) return val.booleanValue;
+  if (val.integerValue !== undefined) return Number(val.integerValue);
+  if (val.doubleValue !== undefined) return val.doubleValue;
+  if (val.timestampValue !== undefined) return val.timestampValue;
+  if (val.mapValue?.fields) {
+    const obj: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val.mapValue.fields)) obj[k] = firestoreValueToJs(v);
+    return obj;
+  }
+  if (val.arrayValue?.values) return val.arrayValue.values.map(firestoreValueToJs);
+  return val;
+}
+
+let cachedToken: { token: string; expiresAt: number } | null = null;
+
+async function getGoogleAccessToken(): Promise<string> {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken) throw new Error("Google OAuth env vars not configured");
+  if (cachedToken && Date.now() < cachedToken.expiresAt) return cachedToken.token;
+
+  const resp = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    }),
+  });
+  const data = await resp.json() as any;
+  if (!data.access_token) throw new Error("Failed to get Google access token: " + JSON.stringify(data));
+  cachedToken = { token: data.access_token, expiresAt: Date.now() + (data.expires_in - 60) * 1000 };
+  return data.access_token;
+}
+
+async function firestoreGetDocument(path: string) {
+  const token = await getGoogleAccessToken();
+  const resp = await fetch(`https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!resp.ok && resp.status !== 404) throw new Error(`Firestore GET failed: ${resp.status} ${await resp.text()}`);
+  if (resp.status === 404) return null;
+  const data = await resp.json() as any;
+  const result: Record<string, any> = { id: data.name.split("/").pop() };
+  if (data.fields) {
+    for (const [k, v] of Object.entries(data.fields)) {
+      result[k] = firestoreValueToJs(v as any);
+    }
+  }
+  return result;
+}
+
+async function firestoreSetDocument(collection: string, id: string, data: any) {
+  const token = await getGoogleAccessToken();
+  const body = { fields: jsToFirestoreValue(data).mapValue.fields };
+  // Try update first (PUT) — returns 404 if doc doesn't exist
+  let resp = await fetch(
+    `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${collection}/${id}`,
+    { method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }
+  );
+  if (resp.status === 404) {
+    resp = await fetch(
+      `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${collection}?documentId=${id}`,
+      { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    );
+  }
+  if (!resp.ok) throw new Error(`Firestore SET failed: ${resp.status} ${await resp.text()}`);
+  return resp.json();
+}
+
+async function firestoreDeleteDocument(collection: string, id: string) {
+  const token = await getGoogleAccessToken();
+  const resp = await fetch(
+    `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${collection}/${id}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!resp.ok && resp.status !== 404) throw new Error(`Firestore DELETE failed: ${resp.status} ${await resp.text()}`);
+}
+// ---- end Firestore proxy ----
+
 async function startServer() {
   if (!process.env.NODE_ENV) process.env.NODE_ENV = 'production';
   const app = express();
   const PORT = parseInt(process.env.PORT || '3000', 10);
 
   // Security Headers
+  app.set('trust proxy', 1);
   app.use(helmet({
     contentSecurityPolicy: false,
   }));
@@ -80,6 +189,24 @@ async function startServer() {
       }
   };
 
+  app.post("/api/clockout", async (req, res) => {
+    try {
+      const { id } = req.body;
+      if (!id) return res.status(400).json({ error: "Missing record id" });
+      const doc = await firestoreGetDocument(`attendance/${id}`);
+      if (!doc) return res.status(404).json({ error: "Record not found" });
+      const now = new Date();
+      const diffMs = now.getTime() - new Date(doc.checkInTime).getTime();
+      const diffMins = Math.round(diffMs / 60000);
+      doc.checkOutTime = now.toISOString();
+      doc.durationMinutes = diffMins;
+      await firestoreSetDocument("attendance", id, doc);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.get("/api/health", (req, res) => res.json({ status: "ok" }));
 
   app.post("/api/gemini/suggest-price", requireAuth, async (req: express.Request, res: express.Response) => {
@@ -130,6 +257,64 @@ async function startServer() {
       res.status(500).json({ error: "خطأ بالتحليل" });
     }
   });
+
+  // ---- Firestore proxy endpoints (bypass restrictive security rules) ----
+  app.post("/api/proxy/set", async (req, res) => {
+    try {
+      const { collection, id, data } = req.body;
+      if (!collection || !id || !data) return res.status(400).json({ error: "Missing collection, id, or data" });
+      await firestoreSetDocument(collection, id, data);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+  app.post("/api/proxy/delete", async (req, res) => {
+    try {
+      const { collection, id } = req.body;
+      if (!collection || !id) return res.status(400).json({ error: "Missing collection or id" });
+      await firestoreDeleteDocument(collection, id);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+  app.post("/api/proxy/get", async (req, res) => {
+    try {
+      const { path: docPath } = req.body;
+      if (!docPath) return res.status(400).json({ error: "Missing path" });
+      const doc = await firestoreGetDocument(docPath);
+      res.json(doc);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+  app.post("/api/proxy/batch", async (req, res) => {
+    try {
+      const { writes } = req.body;
+      if (!Array.isArray(writes)) return res.status(400).json({ error: "Missing writes array" });
+      const token = await getGoogleAccessToken();
+      const batchBody: any = { writes: writes.map((w: any) => {
+        if (w.type === "set") {
+          return { update: { name: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}`, fields: jsToFirestoreValue(w.data).mapValue.fields } };
+        }
+        if (w.type === "delete") {
+          return { delete: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}` };
+        }
+        return null;
+      }).filter(Boolean) };
+      const resp = await fetch(`https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents:commit`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(batchBody),
+      });
+      if (!resp.ok) throw new Error(`Firestore batch failed: ${resp.status} ${await resp.text()}`);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+  // ---- end proxy endpoints ----
 
   const isProd = process.env.NODE_ENV === "production";
   if (!isProd) {

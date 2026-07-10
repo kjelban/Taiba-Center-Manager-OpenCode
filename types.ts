@@ -112,8 +112,8 @@ export interface Attendance {
   employeeName: string;
   date: string;
   checkInTime: string;
-  checkOutTime?: string;
-  durationMinutes?: number;
+  checkOutTime?: string | null;
+  durationMinutes?: number | null;
 }
 
 export interface AppState {

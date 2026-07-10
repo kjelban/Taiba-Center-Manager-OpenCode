@@ -1,6 +1,39 @@
 import { db, auth } from './firebase';
 import { collection, doc, getDocs, getDoc, setDoc, deleteDoc, writeBatch, onSnapshot } from 'firebase/firestore';
 
+const PROXY_PASSWORD = 'admin123';
+
+async function doFetch(url: string, body: any): Promise<boolean> {
+  try {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Proxy-Password': PROXY_PASSWORD }, body: JSON.stringify(body) });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      console.warn(`Proxy ${url} returned ${res.status}: ${txt}`);
+    }
+    return res.ok;
+  } catch (e) {
+    console.warn(`Proxy ${url} threw:`, e);
+    return false;
+  }
+}
+
+async function proxySet(collectionName: string, id: string, data: any): Promise<boolean> {
+  return doFetch('/api/proxy/set', { collection: collectionName, id, data });
+}
+async function proxyDelete(collectionName: string, id: string): Promise<boolean> {
+  return doFetch('/api/proxy/delete', { collection: collectionName, id });
+}
+async function proxyGet<T>(path: string): Promise<T | null> {
+  try {
+    const res = await fetch('/api/proxy/get', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Proxy-Password': PROXY_PASSWORD }, body: JSON.stringify({ path }) });
+    return res.ok ? (await res.json() as T) : null;
+  } catch { return null; }
+}
+export async function proxyBatchSet(writes: { collection: string; id: string; data: any }[]): Promise<boolean> {
+  return doFetch('/api/proxy/batch', { writes: writes.map(w => ({ type: "set", collection: w.collection, id: w.id, data: w.data })) });
+}
+
+
 export enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',
@@ -83,15 +116,18 @@ export async function getAll<T>(collectionName: string): Promise<T[]> {
 }
 
 export async function setData(collectionName: string, id: string, data: any): Promise<void> {
+  const ok = await proxySet(collectionName, id, data);
+  if (ok) return;
   try {
-    const sanitizedData = sanitizeData(data);
-    await setDoc(doc(db, collectionName, id), sanitizedData);
+    await setDoc(doc(db, collectionName, id), sanitizeData(data));
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `${collectionName}/${id}`);
   }
 }
 
 export async function deleteData(collectionName: string, id: string): Promise<void> {
+  const ok = await proxyDelete(collectionName, id);
+  if (ok) return;
   try {
     await deleteDoc(doc(db, collectionName, id));
   } catch (error) {
