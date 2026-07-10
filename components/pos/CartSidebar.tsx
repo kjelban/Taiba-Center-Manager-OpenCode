@@ -130,7 +130,10 @@ const CartSidebar: React.FC<CartSidebarProps> = ({
                     cart.map(item => (
                         <div key={item.id} className="flex justify-between items-center bg-white p-2 rounded-lg border border-slate-100 shadow-sm">
                             <div className="flex-1 ml-2">
-                                <h4 className="font-bold text-slate-800 text-sm line-clamp-1">{item.name}</h4>
+                                <div className="flex items-center gap-2">
+                                    <h4 className="font-bold text-slate-800 text-sm line-clamp-1">{item.name}</h4>
+                                    {item.isManualItem && <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-bold">خارج المخزن</span>}
+                                </div>
                                 <div className="flex items-center gap-2 text-xs text-slate-500">
                                     <span>{item.sellingPrice} د.ل</span>
                                     <span className="text-slate-300">|</span>

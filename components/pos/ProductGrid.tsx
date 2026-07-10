@@ -1,5 +1,5 @@
 import React from 'react';
-import { Plus, Search, ScanLine } from 'lucide-react';
+import { Plus, Search, ScanLine, PackagePlus } from 'lucide-react';
 import { Product } from '../../types';
 
 interface ProductGridProps {
@@ -8,6 +8,7 @@ interface ProductGridProps {
     filteredProducts: Product[];
     addToCart: (product: Product) => void;
     onOpenScanner: () => void;
+    onAddManualItem: () => void;
 }
 
 const ProductGrid: React.FC<ProductGridProps> = ({
@@ -15,7 +16,8 @@ const ProductGrid: React.FC<ProductGridProps> = ({
     setSearchTerm,
     filteredProducts,
     addToCart,
-    onOpenScanner
+    onOpenScanner,
+    onAddManualItem
 }) => {
     return (
         <div className="flex-1 flex flex-col min-h-0">
@@ -35,6 +37,10 @@ const ProductGrid: React.FC<ProductGridProps> = ({
                     <button onClick={onOpenScanner} className="bg-slate-800 text-white px-4 rounded-xl flex flex-col items-center justify-center hover:bg-slate-700 transition-colors shadow-sm min-w-[60px]">
                         <ScanLine size={24} />
                         <span className="text-[10px] hidden md:inline">ماسح</span>
+                    </button>
+                    <button onClick={onAddManualItem} className="bg-emerald-600 text-white px-4 rounded-xl flex flex-col items-center justify-center hover:bg-emerald-700 transition-colors shadow-sm min-w-[60px]">
+                        <PackagePlus size={24} />
+                        <span className="text-[10px] hidden md:inline">يدوي</span>
                     </button>
                 </div>
             </div>

@@ -21,7 +21,8 @@ export const SaleService = {
       sale.isPaid = true;
     }
     await setData(COLLECTIONS.SALES, sale.id, sale);
-    await ProductService.updateStock(sale.items.map(i => ({ id: i.id, quantity: i.quantity })), 'decrease');
+    const stockItems = sale.items.filter(i => !i.isManualItem).map(i => ({ id: i.id, quantity: i.quantity }));
+    if (stockItems.length > 0) await ProductService.updateStock(stockItems, 'decrease');
     if (sale.customerId) {
       const isDebt = sale.paymentMethod === PaymentMethod.DEBT;
       await CustomerService.updateCustomerPurchase(sale.customerId, sale.totalAmount, isDebt);
@@ -32,8 +33,10 @@ export const SaleService = {
     const oldSaleSnap = await getDoc(doc(db, COLLECTIONS.SALES, updatedSale.id));
     if (!oldSaleSnap.exists()) return;
     const oldSale = oldSaleSnap.data() as Sale;
-    await ProductService.updateStock(oldSale.items.map(i => ({ id: i.id, quantity: i.quantity })), 'increase');
-    await ProductService.updateStock(updatedSale.items.map(i => ({ id: i.id, quantity: i.quantity })), 'decrease');
+    const oldStockItems = oldSale.items.filter(i => !i.isManualItem).map(i => ({ id: i.id, quantity: i.quantity }));
+    const newStockItems = updatedSale.items.filter(i => !i.isManualItem).map(i => ({ id: i.id, quantity: i.quantity }));
+    if (oldStockItems.length > 0) await ProductService.updateStock(oldStockItems, 'increase');
+    if (newStockItems.length > 0) await ProductService.updateStock(newStockItems, 'decrease');
     await setData(COLLECTIONS.SALES, updatedSale.id, updatedSale);
   },
 
@@ -112,7 +115,8 @@ export const SaleService = {
       isPaid: true
     };
     await setData(COLLECTIONS.SALES, returnSale.id, returnSale);
-    await ProductService.updateStock(originalSale.items.map(i => ({ id: i.id, quantity: i.quantity })), 'increase');
+    const stockItems = originalSale.items.filter(i => !i.isManualItem).map(i => ({ id: i.id, quantity: i.quantity }));
+    if (stockItems.length > 0) await ProductService.updateStock(stockItems, 'increase');
     if (originalSale.customerId) {
       let debtAdjustment = 0;
       if (originalSale.paymentMethod === PaymentMethod.DEBT && !originalSale.isPaid) {

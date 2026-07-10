@@ -40,6 +40,7 @@ export interface Product {
 
 export interface CartItem extends Product {
   quantity: number;
+  isManualItem?: boolean;
 }
 
 export interface Customer {

@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Product, CartItem, PaymentMethod, Sale, Employee, Customer, SaleType } from '../types';
 import { DataService } from '../services/dataService';
-import { Search, ShoppingCart, Trash2, CreditCard, Banknote, Plus, Minus, Check, ScanLine, X, RotateCcw, User, UserPlus, Printer, Clock, Calendar as CalendarIcon, AlertTriangle } from 'lucide-react';
+import { Search, ShoppingCart, Trash2, CreditCard, Banknote, Plus, Minus, Check, ScanLine, X, RotateCcw, User, UserPlus, Printer, Clock, Calendar as CalendarIcon, AlertTriangle, PackagePlus } from 'lucide-react';
 import ScannerModal from '../components/pos/ScannerModal';
 import ProductGrid from '../components/pos/ProductGrid';
 import CartSidebar from '../components/pos/CartSidebar';
@@ -37,7 +37,12 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
 
   // Scanner State
   const [isScannerOpen, setIsScannerOpen] = useState(false);
- 
+  
+  // Manual Item Dialog
+  const [showManualDialog, setShowManualDialog] = useState(false);
+  const [manualItemName, setManualItemName] = useState('');
+  const [manualItemPrice, setManualItemPrice] = useState('');
+  const [manualItemQty, setManualItemQty] = useState('1');
 
   
   // Ref to hold the latest products list
@@ -120,6 +125,32 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
         }
         return [...prev, {...product, quantity: 1}];
     });
+  };
+
+  const addManualItem = () => {
+    const name = manualItemName.trim();
+    const price = parseFloat(manualItemPrice);
+    const qty = parseInt(manualItemQty) || 1;
+    if (!name || !price || price <= 0) return;
+    setLastCompletedSale(null);
+    setCart(prev => [...prev, {
+      id: crypto.randomUUID(),
+      name,
+      category: 'خارج المخزن',
+      size: '-',
+      color: '-',
+      purchasePrice: 0,
+      sellingPrice: price,
+      stock: 999,
+      minStockAlert: 0,
+      season: '-',
+      quantity: qty,
+      isManualItem: true,
+    }]);
+    setManualItemName('');
+    setManualItemPrice('');
+    setManualItemQty('1');
+    setShowManualDialog(false);
   };
 
   const removeFromCart = (id: string) => {
@@ -237,6 +268,7 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
             filteredProducts={filteredProducts}
             addToCart={addToCart}
             onOpenScanner={() => setIsScannerOpen(true)}
+            onAddManualItem={() => setShowManualDialog(true)}
         />
         <CartSidebar 
             isCartExpanded={isCartExpanded}
@@ -269,6 +301,40 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
             products={products}
             onProductScan={(product) => addToCart(product)}
         />
+
+        {showManualDialog && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setShowManualDialog(false)}>
+                <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm mx-4" onClick={e => e.stopPropagation()}>
+                    <h3 className="text-lg font-bold text-slate-800 mb-4">إضافة صنف خارج المخزن</h3>
+                    <div className="space-y-3">
+                        <div>
+                            <label className="block text-sm font-medium text-slate-600 mb-1">اسم الصنف</label>
+                            <input type="text" value={manualItemName} onChange={e => setManualItemName(e.target.value)}
+                                className="w-full p-2.5 border border-slate-200 rounded-xl outline-none focus:border-emerald-400 transition-colors text-sm" 
+                                placeholder="مثال: كرتون ماء" autoFocus />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-600 mb-1">سعر البيع</label>
+                            <input type="number" value={manualItemPrice} onChange={e => setManualItemPrice(e.target.value)}
+                                className="w-full p-2.5 border border-slate-200 rounded-xl outline-none focus:border-emerald-400 transition-colors text-sm" 
+                                placeholder="0" min="0" step="0.01" />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-600 mb-1">الكمية</label>
+                            <input type="number" value={manualItemQty} onChange={e => setManualItemQty(e.target.value)}
+                                className="w-full p-2.5 border border-slate-200 rounded-xl outline-none focus:border-emerald-400 transition-colors text-sm" 
+                                placeholder="1" min="1" />
+                        </div>
+                    </div>
+                    <div className="flex gap-2 mt-5">
+                        <button onClick={() => setShowManualDialog(false)}
+                            className="flex-1 p-2.5 border border-slate-200 rounded-xl text-slate-600 font-medium hover:bg-slate-50 transition-colors text-sm">إلغاء</button>
+                        <button onClick={addManualItem}
+                            className="flex-1 p-2.5 bg-emerald-600 text-white rounded-xl font-medium hover:bg-emerald-700 transition-colors text-sm shadow-lg shadow-emerald-600/20">إضافة</button>
+                    </div>
+                </div>
+            </div>
+        )}
         
         <POSDebtAlertModal 
             isOpen={isDebtAlertOpen}
