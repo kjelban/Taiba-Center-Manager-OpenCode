@@ -42,6 +42,7 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
   const [showManualDialog, setShowManualDialog] = useState(false);
   const [manualItemName, setManualItemName] = useState('');
   const [manualItemPrice, setManualItemPrice] = useState('');
+  const [manualItemPurchasePrice, setManualItemPurchasePrice] = useState('');
   const [manualItemQty, setManualItemQty] = useState('1');
 
   
@@ -129,9 +130,10 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
 
   const addManualItem = () => {
     const name = manualItemName.trim();
-    const price = parseFloat(manualItemPrice);
+    const sellPrice = parseFloat(manualItemPrice);
+    const buyPrice = parseFloat(manualItemPurchasePrice) || 0;
     const qty = parseInt(manualItemQty) || 1;
-    if (!name || !price || price <= 0) return;
+    if (!name || !sellPrice || sellPrice <= 0) return;
     setLastCompletedSale(null);
     setCart(prev => [...prev, {
       id: crypto.randomUUID(),
@@ -139,8 +141,8 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
       category: 'خارج المخزن',
       size: '-',
       color: '-',
-      purchasePrice: 0,
-      sellingPrice: price,
+      purchasePrice: buyPrice,
+      sellingPrice: sellPrice,
       stock: 999,
       minStockAlert: 0,
       season: '-',
@@ -149,6 +151,7 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
     }]);
     setManualItemName('');
     setManualItemPrice('');
+    setManualItemPurchasePrice('');
     setManualItemQty('1');
     setShowManualDialog(false);
   };
@@ -312,6 +315,12 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
                             <input type="text" value={manualItemName} onChange={e => setManualItemName(e.target.value)}
                                 className="w-full p-2.5 border border-slate-200 rounded-xl outline-none focus:border-emerald-400 transition-colors text-sm" 
                                 placeholder="مثال: كرتون ماء" autoFocus />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-600 mb-1">سعر الشراء</label>
+                            <input type="number" value={manualItemPurchasePrice} onChange={e => setManualItemPurchasePrice(e.target.value)}
+                                className="w-full p-2.5 border border-slate-200 rounded-xl outline-none focus:border-emerald-400 transition-colors text-sm" 
+                                placeholder="0" min="0" step="0.01" />
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-slate-600 mb-1">سعر البيع</label>
