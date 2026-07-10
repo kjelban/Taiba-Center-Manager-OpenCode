@@ -4,7 +4,7 @@ import { Employee, EmployeeType, Attendance, Sale } from '../types';
 import { DataService } from '../services/dataService';
 import EmployeeModal from '../components/modals/EmployeeModal';
 import { Plus, Trash2, Users, User, Briefcase, Banknote, Clock, Calendar, Shield, Edit2, Lock, FileSpreadsheet, ChevronDown, ChevronUp, Filter } from 'lucide-react';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 
 const TABS = ['users', 'worklog'] as const;
 type Tab = typeof TABS[number];
@@ -221,23 +221,61 @@ const Employees: React.FC = () => {
     }).filter(r => worklogFilter !== 'all' || r.checkOutTime !== undefined);
   }, [attendanceRecords, sales, worklogFilter, customFrom, customTo]);
 
-  const exportToExcel = () => {
-    const wb = XLSX.utils.book_new();
+  const exportToExcel = async () => {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'مركز طيبة';
+    workbook.created = new Date();
 
-    // Sheet 1: Work log
-    const rows = worklogData.map(r => ({
-      'الموظف': r.employeeName,
-      'التاريخ': r.date,
-      'وقت الدخول': formatTime(r.checkInTime),
-      'وقت الخروج': r.checkOutTime ? formatTime(r.checkOutTime) : 'لم يسجل خروج',
-      'مدة العمل': formatDuration(r.durationMinutes),
-      'عدد المبيعات': r.salesCount,
-      'إجمالي المبيعات': r.salesTotal,
-    }));
-    const ws = XLSX.utils.json_to_sheet(rows);
-    XLSX.utils.book_append_sheet(wb, ws, 'سجل العمل');
+    const thin = { style: 'thin' as const };
+    const b = { top: thin, left: thin, bottom: thin, right: thin };
+    const hdrF = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11, name: 'Arial' };
+    const hdrBg = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FF2C5F8A' } };
+    const dataF = { size: 10, name: 'Arial' };
+    const greenBg = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FF28A745' } };
+    const al = (a: string) => ({ horizontal: a as any, vertical: 'middle' as const });
 
-    // Sheet 2: Per-employee sales summary
+    // ── Sheet 1: سجل العمل ──
+    const ws1 = workbook.addWorksheet('سجل العمل');
+    ws1.columns = [
+      { width: 20 }, { width: 14 }, { width: 14 }, { width: 14 },
+      { width: 14 }, { width: 14 }, { width: 18 },
+    ];
+    const h1 = ws1.addRow(['الموظف', 'التاريخ', 'وقت الدخول', 'وقت الخروج', 'مدة العمل', 'عدد المبيعات', 'إجمالي المبيعات']);
+    h1.eachCell(cell => { cell.font = hdrF; cell.fill = hdrBg; cell.alignment = al('center'); cell.border = b; });
+    ws1.getRow(1).height = 26;
+
+    worklogData.forEach(r => {
+      const vals = [
+        r.employeeName, r.date,
+        formatTime(r.checkInTime),
+        r.checkOutTime ? formatTime(r.checkOutTime) : 'لم يسجل خروج',
+        formatDuration(r.durationMinutes),
+        r.salesCount, r.salesTotal,
+      ];
+      const row = ws1.addRow(vals);
+      row.eachCell((cell: any, col: number) => {
+        cell.font = dataF; cell.border = b; cell.alignment = al('center');
+        if (col === 7) cell.numFmt = '#,##0.00';
+      });
+    });
+
+    // Totals row
+    const totCount = worklogData.reduce((s, r) => s + r.salesCount, 0);
+    const totSales = worklogData.reduce((s, r) => s + r.salesTotal, 0);
+    const totMins = worklogData.reduce((s, r) => s + (r.durationMinutes || 0), 0);
+    const tr = ws1.addRow(['الإجمالي', '', '', '', formatDuration(totMins), totCount, totSales]);
+    tr.eachCell((cell: any, col: number) => {
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11, name: 'Arial' };
+      cell.fill = greenBg; cell.border = b; cell.alignment = al('center');
+      if (col === 7) cell.numFmt = '#,##0.00';
+    });
+
+    // ── Sheet 2: ملخص المبيعات ──
+    const ws2 = workbook.addWorksheet('ملخص المبيعات');
+    ws2.columns = [{ width: 20 }, { width: 18 }, { width: 14 }, { width: 18 }];
+    const h2 = ws2.addRow(['الموظف', 'إجمالي ساعات العمل', 'عدد المبيعات', 'إجمالي المبيعات']);
+    h2.eachCell(cell => { cell.font = hdrF; cell.fill = hdrBg; cell.alignment = al('center'); cell.border = b; });
+
     const empSales: Record<string, { name: string; salesCount: number; salesTotal: number; totalMinutes: number }> = {};
     worklogData.forEach(r => {
       if (!empSales[r.employeeName]) empSales[r.employeeName] = { name: r.employeeName, salesCount: 0, salesTotal: 0, totalMinutes: 0 };
@@ -245,16 +283,33 @@ const Employees: React.FC = () => {
       empSales[r.employeeName].salesTotal += r.salesTotal;
       empSales[r.employeeName].totalMinutes += r.durationMinutes || 0;
     });
-    const summaryRows = Object.values(empSales).map(e => ({
-      'الموظف': e.name,
-      'إجمالي ساعات العمل': `${Math.floor(e.totalMinutes / 60)}س ${e.totalMinutes % 60}د`,
-      'عدد المبيعات': e.salesCount,
-      'إجمالي المبيعات': e.salesTotal,
-    }));
-    const ws2 = XLSX.utils.json_to_sheet(summaryRows);
-    XLSX.utils.book_append_sheet(wb, ws2, 'ملخص المبيعات');
+    const empRows = Object.values(empSales);
+    empRows.forEach(e => {
+      const row = ws2.addRow([e.name, `${Math.floor(e.totalMinutes / 60)}س ${e.totalMinutes % 60}د`, e.salesCount, e.salesTotal]);
+      row.eachCell((cell: any, col: number) => {
+        cell.font = dataF; cell.border = b; cell.alignment = al('center');
+        if (col === 4) cell.numFmt = '#,##0.00';
+      });
+    });
 
-    XLSX.writeFile(wb, `سجل_العمل_${new Date().toISOString().split('T')[0]}.xlsx`);
+    // Grand total
+    const gCount = empRows.reduce((s, e) => s + e.salesCount, 0);
+    const gSales = empRows.reduce((s, e) => s + e.salesTotal, 0);
+    const gMins = empRows.reduce((s, e) => s + e.totalMinutes, 0);
+    const gtr = ws2.addRow(['الإجمالي', `${Math.floor(gMins / 60)}س ${gMins % 60}د`, gCount, gSales]);
+    gtr.eachCell((cell: any, col: number) => {
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11, name: 'Arial' };
+      cell.fill = greenBg; cell.border = b; cell.alignment = al('center');
+      if (col === 4) cell.numFmt = '#,##0.00';
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `سجل_العمل_${new Date().toISOString().split('T')[0]}.xlsx`;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
   };
 
   return (

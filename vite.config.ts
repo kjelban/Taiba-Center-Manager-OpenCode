@@ -27,7 +27,6 @@ export default defineConfig(({ mode }) => {
               'lucide': ['lucide-react'],
               'firebase': ['firebase/app', 'firebase/firestore', 'firebase/auth'],
               'vendor': ['react', 'react-dom', 'react-router-dom'],
-              'xlsx': ['xlsx'],
               'exceljs': ['exceljs']
             }
           }
