@@ -6,7 +6,7 @@ import EmployeeModal from '../components/modals/EmployeeModal';
 import { Plus, Trash2, Users, User, Briefcase, Banknote, Clock, Calendar, Shield, Edit2, Lock, FileSpreadsheet, ChevronDown, ChevronUp, Filter } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
-const TABS = ['users', 'attendance', 'worklog'] as const;
+const TABS = ['users', 'worklog'] as const;
 type Tab = typeof TABS[number];
 
 const Employees: React.FC = () => {
@@ -267,7 +267,7 @@ const Employees: React.FC = () => {
         
         <div className="flex bg-white p-1 rounded-lg border border-slate-200">
             {(['users', 'attendance', 'worklog'] as const).map(tab => {
-                const labels: Record<Tab, string> = { users: 'المستخدمين', attendance: 'سجل الدوام', worklog: 'سجل العمل' };
+                const labels: Record<Tab, string> = { users: 'المستخدمين', worklog: 'سجل العمل' };
                 return (
                     <button key={tab} onClick={() => setActiveTab(tab)}
                         className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${activeTab === tab ? 'bg-slate-100 text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
@@ -380,51 +380,6 @@ const Employees: React.FC = () => {
                 </table>
             </div>
         </>
-      ) : activeTab === 'attendance' ? (
-        <div className="flex-1 overflow-auto bg-white rounded-xl shadow-sm border border-slate-100">
-            <table className="w-full text-right">
-                <thead className="bg-slate-50 sticky top-0 z-10">
-                    <tr>
-                        <th className="p-4 text-slate-500 font-medium text-sm">الموظف</th>
-                        <th className="p-4 text-slate-500 font-medium text-sm">التاريخ</th>
-                        <th className="p-4 text-slate-500 font-medium text-sm">وقت الدخول</th>
-                        <th className="p-4 text-slate-500 font-medium text-sm">وقت الخروج</th>
-                        <th className="p-4 text-slate-500 font-medium text-sm">مدة العمل</th>
-                    </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                    {attendanceRecords.map(record => (
-                        <tr key={record.id} className="hover:bg-slate-50/50">
-                            <td className="p-4 font-bold text-slate-700">{record.employeeName}</td>
-                            <td className="p-4 text-slate-600 flex items-center gap-2">
-                                <Calendar size={14} className="text-slate-400" />
-                                {record.date}
-                            </td>
-                            <td className="p-4 text-green-600 dir-ltr text-right">
-                                {formatTime(record.checkInTime)}
-                            </td>
-                            <td className="p-4 text-red-600 dir-ltr text-right">
-                                {record.checkOutTime 
-                                    ? formatTime(record.checkOutTime)
-                                    : <span className="text-slate-400 italic">...</span>
-                                }
-                            </td>
-                            <td className="p-4">
-                                <div className={`flex items-center gap-2 font-bold ${!record.durationMinutes ? 'text-blue-600' : 'text-slate-800'}`}>
-                                    <Clock size={16} />
-                                    {formatDuration(record.durationMinutes)}
-                                </div>
-                            </td>
-                        </tr>
-                    ))}
-                    {attendanceRecords.length === 0 && (
-                        <tr>
-                            <td colSpan={5} className="p-12 text-center text-slate-400">لا توجد سجلات دوام حتى الآن</td>
-                        </tr>
-                    )}
-                </tbody>
-            </table>
-        </div>
       ) : (
         <div className="flex-1 flex flex-col overflow-hidden">
             {/* Filters */}
