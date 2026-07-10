@@ -195,6 +195,7 @@ async function startServer() {
       if (!id) return res.status(400).json({ error: "Missing record id" });
       const doc = await firestoreGetDocument(`attendance/${id}`);
       if (!doc) return res.status(404).json({ error: "Record not found" });
+      if (doc.checkOutTime) return res.json({ ok: true });
       const now = new Date();
       const diffMs = now.getTime() - new Date(doc.checkInTime).getTime();
       const diffMins = Math.round(diffMs / 60000);

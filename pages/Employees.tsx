@@ -212,7 +212,12 @@ const Employees: React.FC = () => {
       });
       const salesTotal = shiftSales.reduce((sum, s) => sum + s.totalAmount, 0);
       const salesCount = shiftSales.length;
-      return { ...record, shiftSales, salesCount, salesTotal };
+      const durationMinutes = record.durationMinutes ?? (
+        record.checkOutTime
+          ? Math.round((new Date(record.checkOutTime).getTime() - new Date(record.checkInTime).getTime()) / 60000)
+          : null
+      );
+      return { ...record, shiftSales, salesCount, salesTotal, durationMinutes };
     }).filter(r => worklogFilter !== 'all' || r.checkOutTime !== undefined);
   }, [attendanceRecords, sales, worklogFilter, customFrom, customTo]);
 

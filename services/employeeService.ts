@@ -41,11 +41,12 @@ export const AttendanceService = {
   },
 
   closeRecord: async (record: Attendance): Promise<void> => {
-    if (record.checkOutTime) return;
-    const now = new Date();
-    const diffMs = now.getTime() - new Date(record.checkInTime).getTime();
+    const checkOut = record.checkOutTime ? new Date(record.checkOutTime) : new Date();
+    const diffMs = checkOut.getTime() - new Date(record.checkInTime).getTime();
     const diffMins = Math.round(diffMs / 60000);
-    record.checkOutTime = now.toISOString();
+    if (!record.checkOutTime) {
+      record.checkOutTime = checkOut.toISOString();
+    }
     record.durationMinutes = diffMins;
     await setData(COLLECTIONS.ATTENDANCE, record.id, record);
   },
