@@ -174,7 +174,7 @@ const Reports: React.FC = () => {
     const ws2 = workbook.addWorksheet('المبيعات حسب المنتج');
     ws2.columns = [{ width: 28 }, { width: 12 }, { width: 18 }, { width: 18 }, { width: 18 }, { width: 14 }];
     const ph = ['المنتج', 'الكمية', 'الإيرادات', 'التكلفة', 'الربح', 'ملاحظات'];
-    ws2.addRow(ph).eachCell(c => { c.font = hdrF; c.fill = hdrBg; c.alignment = c('center'); c.border = b; });
+    ws2.addRow(ph).eachCell(cell => { cell.font = hdrF; cell.fill = hdrBg; cell.alignment = { horizontal: 'center', vertical: 'middle' }; cell.border = b; });
     ws2.getRow(1).height = 26;
     productSales.forEach(p => {
       const vals = [p.name, p.qty, p.revenue, p.purchaseCost, p.profit, p.isManual ? 'خارج المخزن' : ''];
@@ -198,8 +198,8 @@ const Reports: React.FC = () => {
     // ── Sheet 3: المصاريف ──
     const ws3 = workbook.addWorksheet('المصاريف');
     ws3.columns = [{ width: 14 }, { width: 16 }, { width: 32 }, { width: 18 }];
-    ws3.addRow(['التاريخ', 'التصنيف', 'الوصف', 'المبلغ']).eachCell(c => {
-      c.font = hdrF; c.fill = hdrBg; c.alignment = c('center'); c.border = b;
+    ws3.addRow(['التاريخ', 'التصنيف', 'الوصف', 'المبلغ']).eachCell(cell => {
+      cell.font = hdrF; cell.fill = hdrBg; cell.alignment = { horizontal: 'center', vertical: 'middle' }; cell.border = b;
     });
     filteredExpenses.forEach(e => {
       const row = ws3.addRow([new Date(e.date).toLocaleDateString(), e.category, e.description, e.amount]);
@@ -221,8 +221,8 @@ const Reports: React.FC = () => {
     // ── Sheet 4: الفواتير ──
     const ws4 = workbook.addWorksheet('الفواتير');
     ws4.columns = [{ width: 22 }, { width: 14 }, { width: 12 }, { width: 16 }, { width: 16 }, { width: 12 }, { width: 20 }, { width: 16 }];
-    ws4.addRow(['رقم الفاتورة', 'التاريخ', 'عدد الأصناف', 'الإجمالي', 'الربح', 'طريقة الدفع', 'العميل', 'الموظف']).eachCell(c => {
-      c.font = hdrF; c.fill = hdrBg; c.alignment = c('center'); c.border = b;
+    ws4.addRow(['رقم الفاتورة', 'التاريخ', 'عدد الأصناف', 'الإجمالي', 'الربح', 'طريقة الدفع', 'العميل', 'الموظف']).eachCell(cell => {
+      cell.font = hdrF; cell.fill = hdrBg; cell.alignment = { horizontal: 'center', vertical: 'middle' }; cell.border = b;
     });
     filteredSales.forEach(s => {
       const row = ws4.addRow([s.id, new Date(s.date).toLocaleDateString(), s.items.length, s.totalAmount, s.profit, s.paymentMethod, s.customerName || '-', s.createdBy]);
