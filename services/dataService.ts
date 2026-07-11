@@ -21,6 +21,7 @@ export const DataService = {
   getProducts: ProductService.getProducts,
   subscribeToProducts: ProductService.subscribeToProducts,
   saveProduct: ProductService.saveProduct,
+  deleteProduct: ProductService.deleteProduct,
   updateStock: ProductService.updateStock,
 
   // Sale methods

@@ -1,7 +1,7 @@
 import { Product } from '../types';
 import { db } from './firebase';
 import { doc, getDoc, writeBatch } from 'firebase/firestore';
-import { COLLECTIONS, getAll, setData, subscribeToCollection, sanitizeData, proxyBatchSet, handleFirestoreError, OperationType } from './base';
+import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection, sanitizeData, proxyBatchSet, handleFirestoreError, OperationType } from './base';
 
 export const ProductService = {
   getProducts: async (): Promise<Product[]> => {
@@ -14,6 +14,10 @@ export const ProductService = {
 
   saveProduct: async (product: Product): Promise<void> => {
     await setData(COLLECTIONS.PRODUCTS, product.id, product);
+  },
+
+  deleteProduct: async (id: string): Promise<void> => {
+    await deleteData(COLLECTIONS.PRODUCTS, id);
   },
 
   updateStock: async (items: {id: string, quantity: number}[], mode: 'increase' | 'decrease'): Promise<void> => {

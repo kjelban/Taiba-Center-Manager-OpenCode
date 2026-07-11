@@ -86,6 +86,11 @@ const Inventory: React.FC = () => {
     setIsModalOpen(false);
   };
 
+  const handleDelete = async (product: Product) => {
+    if (!window.confirm(`هل أنت متأكد من حذف "${product.name}"؟`)) return;
+    await DataService.deleteProduct(product.id);
+  };
+
   const getAiPriceSuggestion = async () => {
     if (!formData.name || !formData.purchasePrice) return;
     setLoadingAi(true);
@@ -216,6 +221,13 @@ const Inventory: React.FC = () => {
                         className="text-slate-400 hover:text-primary transition-colors p-1"
                     >
                         <Edit2 size={18} />
+                    </button>
+                    <button 
+                        onClick={() => handleDelete(product)}
+                        className="text-slate-400 hover:text-red-600 transition-colors p-1"
+                        title="حذف المنتج"
+                    >
+                        <Trash size={18} />
                     </button>
                   </div>
                 </td>
