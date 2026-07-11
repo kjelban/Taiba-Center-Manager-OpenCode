@@ -65,7 +65,7 @@ const Inventory: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    const productId = editingProduct ? editingProduct.id : crypto.randomUUID();
+    const productId = editingProduct ? editingProduct.id : Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
     const productToSave: Product = {
         id: productId,
         name: formData.name!,
