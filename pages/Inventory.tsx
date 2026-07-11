@@ -65,7 +65,9 @@ const Inventory: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    const productId = editingProduct ? editingProduct.id : Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
+    const generateShortCode = () => Date.now().toString(36).toUpperCase().slice(-6) + Math.random().toString(36).substring(2, 4).toUpperCase();
+    const shortCode = generateShortCode();
+    const productId = editingProduct ? editingProduct.id : shortCode;
     const productToSave: Product = {
         id: productId,
         name: formData.name!,
@@ -77,8 +79,7 @@ const Inventory: React.FC = () => {
         stock: Number(formData.stock),
         minStockAlert: Number(formData.minStockAlert),
         season: formData.season || 'عام',
-        // If barcode is empty, use ID as barcode
-        barcode: formData.barcode || productId
+        barcode: formData.barcode || shortCode
     };
 
     await DataService.saveProduct(productToSave);
@@ -127,8 +128,8 @@ const Inventory: React.FC = () => {
             <script>
               JsBarcode("#barcode", "${barcodeValue}", {
                 format: "CODE128",
-                width: 2,
-                height: 50,
+                width: 1.5,
+                height: 40,
                 displayValue: true
               });
               window.print();
