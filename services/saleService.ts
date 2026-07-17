@@ -1,9 +1,12 @@
-import { Sale, PaymentMethod, Customer, SaleType } from '../types';
+import { Sale, PaymentMethod, SaleType } from '../types';
 import { db } from './firebase';
-import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
-import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection, handleFirestoreError, OperationType } from './base';
-import { ProductService } from './productService';
+import { collection, doc, getDoc, getDocs, query, where, writeBatch, increment } from 'firebase/firestore';
+import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection, handleFirestoreError, OperationType, sanitizeData } from './base';
 import { CustomerService } from './customerService';
+
+function getStockItems(items: { id: string; quantity: number; isManualItem?: boolean }[]): { id: string; quantity: number }[] {
+  return items.filter(i => !i.isManualItem).map(i => ({ id: i.id, quantity: i.quantity }));
+}
 
 export const SaleService = {
   getSales: async (): Promise<Sale[]> => {
@@ -20,37 +23,66 @@ export const SaleService = {
     } else {
       sale.isPaid = true;
     }
-    await setData(COLLECTIONS.SALES, sale.id, sale);
-    const stockItems = sale.items.filter(i => !i.isManualItem).map(i => ({ id: i.id, quantity: i.quantity }));
-    if (stockItems.length > 0) await ProductService.updateStock(stockItems, 'decrease');
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, COLLECTIONS.SALES, sale.id), sanitizeData(sale));
+
+    const stockItems = getStockItems(sale.items);
+    for (const item of stockItems) {
+      batch.update(doc(db, COLLECTIONS.PRODUCTS, item.id), { stock: increment(-item.quantity) });
+    }
+
     if (sale.customerId) {
       const isDebt = sale.paymentMethod === PaymentMethod.DEBT;
-      await CustomerService.updateCustomerPurchase(sale.customerId, sale.totalAmount, isDebt);
+      CustomerService.addCustomerUpdateToBatch(batch, sale.customerId, sale.totalAmount, isDebt);
     }
+
+    await batch.commit();
   },
 
   updateSale: async (updatedSale: Sale): Promise<void> => {
     const oldSaleSnap = await getDoc(doc(db, COLLECTIONS.SALES, updatedSale.id));
     if (!oldSaleSnap.exists()) return;
     const oldSale = oldSaleSnap.data() as Sale;
-    const oldStockItems = oldSale.items.filter(i => !i.isManualItem).map(i => ({ id: i.id, quantity: i.quantity }));
-    const newStockItems = updatedSale.items.filter(i => !i.isManualItem).map(i => ({ id: i.id, quantity: i.quantity }));
-    if (oldStockItems.length > 0) await ProductService.updateStock(oldStockItems, 'increase');
-    if (newStockItems.length > 0) await ProductService.updateStock(newStockItems, 'decrease');
-    await setData(COLLECTIONS.SALES, updatedSale.id, updatedSale);
+    const oldStockItems = getStockItems(oldSale.items);
+    const newStockItems = getStockItems(updatedSale.items);
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, COLLECTIONS.SALES, updatedSale.id), sanitizeData(updatedSale));
+
+    for (const item of oldStockItems) {
+      batch.update(doc(db, COLLECTIONS.PRODUCTS, item.id), { stock: increment(item.quantity) });
+    }
+    for (const item of newStockItems) {
+      batch.update(doc(db, COLLECTIONS.PRODUCTS, item.id), { stock: increment(-item.quantity) });
+    }
+
+    await batch.commit();
   },
 
   deleteSale: async (id: string): Promise<void> => {
     const saleSnap = await getDoc(doc(db, COLLECTIONS.SALES, id));
     if (!saleSnap.exists()) return;
     const sale = saleSnap.data() as Sale;
-    await ProductService.updateStock(sale.items.map(i => ({ id: i.id, quantity: i.quantity })), 'increase');
-    if (sale.paymentMethod === PaymentMethod.DEBT && !sale.isPaid && sale.customerId) {
-      await CustomerService.updateCustomerPurchase(sale.customerId, -sale.totalAmount, false, -sale.totalAmount);
-    } else if (sale.customerId) {
-      await CustomerService.updateCustomerPurchase(sale.customerId, -sale.totalAmount, false, 0);
+
+    const batch = writeBatch(db);
+    batch.delete(doc(db, COLLECTIONS.SALES, id));
+
+    const stockMultiplier = sale.type === SaleType.RETURN ? -1 : 1;
+    const stockItems = getStockItems(sale.items);
+    for (const item of stockItems) {
+      batch.update(doc(db, COLLECTIONS.PRODUCTS, item.id), { stock: increment(item.quantity * stockMultiplier) });
     }
-    await deleteData(COLLECTIONS.SALES, id);
+
+    if (sale.customerId) {
+      let debtAdjustment = 0;
+      if (sale.paymentMethod === PaymentMethod.DEBT && !sale.isPaid) {
+        debtAdjustment = -sale.totalAmount;
+      }
+      CustomerService.addCustomerUpdateToBatch(batch, sale.customerId, -sale.totalAmount, false, debtAdjustment);
+    }
+
+    await batch.commit();
   },
 
   settleDebt: async (saleId: string): Promise<void> => {
@@ -60,10 +92,15 @@ export const SaleService = {
     if (sale.isPaid) return;
     sale.isPaid = true;
     sale.paidAt = new Date().toISOString();
-    await setData(COLLECTIONS.SALES, saleId, sale);
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, COLLECTIONS.SALES, saleId), sanitizeData(sale));
+
     if (sale.customerId) {
-      await CustomerService.updateCustomerPurchase(sale.customerId, 0, false, -sale.totalAmount);
+      CustomerService.addCustomerUpdateToBatch(batch, sale.customerId, 0, false, -sale.totalAmount);
     }
+
+    await batch.commit();
   },
 
   rescheduleDebt: async (saleId: string, newDate: string): Promise<void> => {
@@ -74,6 +111,7 @@ export const SaleService = {
     await setData(COLLECTIONS.SALES, saleId, sale);
   },
 
+  // NOTE: requires composite index on (isPaid ASC, dueDate ASC) — see firestore.indexes.json
   getOverdueSales: async (): Promise<Sale[]> => {
     try {
       const q = query(collection(db, COLLECTIONS.SALES), where('isPaid', '==', false));
@@ -87,12 +125,13 @@ export const SaleService = {
     }
   },
 
+  // NOTE: requires composite index on (customerId ASC, isPaid ASC) — see firestore.indexes.json
   getUnpaidSalesByCustomer: async (customerId: string): Promise<Sale[]> => {
     try {
-      const q = query(collection(db, COLLECTIONS.SALES), where('customerId', '==', customerId));
+      const q = query(collection(db, COLLECTIONS.SALES), where('customerId', '==', customerId), where('isPaid', '==', false));
       const querySnapshot = await getDocs(q);
       const sales = querySnapshot.docs.map(doc => doc.data() as Sale);
-      return sales.filter(s => s.paymentMethod === PaymentMethod.DEBT && s.isPaid === false);
+      return sales.filter(s => s.paymentMethod === PaymentMethod.DEBT);
     } catch (error) {
       handleFirestoreError(error, OperationType.LIST, COLLECTIONS.SALES);
       return [];
@@ -114,15 +153,23 @@ export const SaleService = {
       originalSaleId: originalSale.id,
       isPaid: true
     };
-    await setData(COLLECTIONS.SALES, returnSale.id, returnSale);
-    const stockItems = originalSale.items.filter(i => !i.isManualItem).map(i => ({ id: i.id, quantity: i.quantity }));
-    if (stockItems.length > 0) await ProductService.updateStock(stockItems, 'increase');
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, COLLECTIONS.SALES, returnSale.id), sanitizeData(returnSale));
+
+    const stockItems = getStockItems(originalSale.items);
+    for (const item of stockItems) {
+      batch.update(doc(db, COLLECTIONS.PRODUCTS, item.id), { stock: increment(item.quantity) });
+    }
+
     if (originalSale.customerId) {
       let debtAdjustment = 0;
       if (originalSale.paymentMethod === PaymentMethod.DEBT && !originalSale.isPaid) {
         debtAdjustment = -originalSale.totalAmount;
       }
-      await CustomerService.updateCustomerPurchase(originalSale.customerId, -originalSale.totalAmount, false, debtAdjustment);
+      CustomerService.addCustomerUpdateToBatch(batch, originalSale.customerId, -originalSale.totalAmount, false, debtAdjustment);
     }
+
+    await batch.commit();
   },
 };

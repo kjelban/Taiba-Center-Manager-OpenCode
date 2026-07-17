@@ -33,7 +33,7 @@ const ProductModal: React.FC<ProductModalProps> = ({
 
     return (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl w-full max-w-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="bg-white rounded-2xl w-full max-w-2xl shadow-2xl max-h-[90vh] overflow-y-auto" role="dialog" aria-modal="true">
                 <form onSubmit={onSave} className="p-6">
                     <h3 className="text-xl font-bold mb-6 text-slate-800">
                         {editingProduct ? 'تعديل بيانات المنتج' : 'إضافة منتج جديد'}
@@ -43,13 +43,13 @@ const ProductModal: React.FC<ProductModalProps> = ({
                         <div className="md:col-span-2">
                             <label className="block text-sm font-medium text-slate-700 mb-1">اسم المنتج</label>
                             <input required type="text" className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none" 
-                                value={formData.name || ''} onChange={e => setFormData({...formData, name: e.target.value})} />
+                                value={formData.name || ''} onChange={e => setFormData({...formData, name: e.target.value})} aria-label="اسم المنتج" />
                         </div>
                         
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">القسم</label>
                             <select className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none" 
-                                value={formData.category || ''} onChange={e => setFormData({...formData, category: e.target.value})}>
+                                value={formData.category || ''} onChange={e => setFormData({...formData, category: e.target.value})} aria-label="القسم">
                                 {categories.map(cat => (
                                     <option key={cat} value={cat}>{cat}</option>
                                 ))}
@@ -59,7 +59,7 @@ const ProductModal: React.FC<ProductModalProps> = ({
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">الموسم</label>
                             <select className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none" 
-                                value={formData.season || ''} onChange={e => setFormData({...formData, season: e.target.value})}>
+                                value={formData.season || ''} onChange={e => setFormData({...formData, season: e.target.value})} aria-label="الموسم">
                                 {seasons.map(season => (
                                     <option key={season} value={season}>{season}</option>
                                 ))}
@@ -91,8 +91,8 @@ const ProductModal: React.FC<ProductModalProps> = ({
                         
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">الكمية المتوفرة</label>
-                            <input required type="number" className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none" 
-                                value={formData.stock || ''} onChange={e => setFormData({...formData, stock: Number(e.target.value)})} />
+                            <input required type="number" min="0" className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none" 
+                                value={formData.stock || ''} onChange={e => setFormData({...formData, stock: Number(e.target.value)})} aria-label="الكمية المتوفرة" />
                         </div>
 
                         <div className="bg-blue-50 p-4 rounded-lg md:col-span-2 border border-blue-100">
@@ -100,13 +100,13 @@ const ProductModal: React.FC<ProductModalProps> = ({
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
                                     <label className="block text-sm font-medium text-slate-700 mb-1">سعر الشراء (التكلفة)</label>
-                                    <input required type="number" className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none" 
-                                        value={formData.purchasePrice || ''} onChange={e => setFormData({...formData, purchasePrice: Number(e.target.value)})} />
+                                    <input required type="number" min="0" className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none" 
+                                        value={formData.purchasePrice || ''} onChange={e => setFormData({...formData, purchasePrice: Number(e.target.value)})} aria-label="سعر الشراء" />
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-slate-700 mb-1">سعر البيع</label>
-                                    <input required type="number" className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none font-bold text-primary" 
-                                        value={formData.sellingPrice || ''} onChange={e => setFormData({...formData, sellingPrice: Number(e.target.value)})} />
+                                    <input required type="number" min="0" className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none font-bold text-primary" 
+                                        value={formData.sellingPrice || ''} onChange={e => setFormData({...formData, sellingPrice: Number(e.target.value)})} aria-label="سعر البيع" />
                                 </div>
                             </div>
                             
@@ -129,7 +129,7 @@ const ProductModal: React.FC<ProductModalProps> = ({
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">حد التنبيه (للكمية المنخفضة)</label>
                             <input required type="number" className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none" 
-                                value={formData.minStockAlert || ''} onChange={e => setFormData({...formData, minStockAlert: Number(e.target.value)})} />
+                                value={formData.minStockAlert || ''} onChange={e => setFormData({...formData, minStockAlert: Number(e.target.value)})} aria-label="حد التنبيه" />
                         </div>
                     </div>
 

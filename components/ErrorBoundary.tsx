@@ -40,6 +40,12 @@ export default class ErrorBoundary extends React.Component<Props, { hasError: bo
             <RefreshCw size={18} />
             إعادة تحميل
           </button>
+          <button
+            onClick={() => this.setState({ hasError: false, error: undefined })}
+            className="flex items-center gap-2 mt-3 bg-slate-200 text-slate-700 px-6 py-2 rounded-lg hover:bg-slate-300 transition-colors"
+          >
+            إعادة المحاولة
+          </button>
         </div>
       );
     }

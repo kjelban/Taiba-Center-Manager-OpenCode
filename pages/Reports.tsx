@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { DataService } from '../services/dataService';
-import { Sale, Expense, Product } from '../types';
+import { Sale, Expense, Product, PaymentMethod } from '../types';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 import { FileText, Download, Calendar } from 'lucide-react';
+import { COLORS } from '../utils/formatUtils';
 import ExcelJS from 'exceljs';
 
 const Reports: React.FC = () => {
@@ -232,7 +233,7 @@ const Reports: React.FC = () => {
       });
     });
     const totalInvProfit = filteredSales.reduce((s, inv) => s + inv.profit, 0);
-    const debtInvoices = filteredSales.filter(s => s.paymentMethod === 'آجل');
+    const debtInvoices = filteredSales.filter(s => s.paymentMethod === PaymentMethod.DEBT);
     const totalDebt = debtInvoices.reduce((s, inv) => s + inv.totalAmount, 0);
     const dr = ws4.addRow(['', '', 'إجمالي الربح', totalInvProfit, 'إجمالي الديون', totalDebt, '', '']);
     dr.eachCell((cell: any, col: number) => {
@@ -259,8 +260,6 @@ const Reports: React.FC = () => {
     document.body.appendChild(a); a.click();
     document.body.removeChild(a); URL.revokeObjectURL(url);
   };
-
-  const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#e91e63', '#9c27b0'];
 
   return (
     <div className="p-6 overflow-auto h-[calc(100vh-64px)]">

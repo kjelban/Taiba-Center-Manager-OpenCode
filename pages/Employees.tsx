@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Employee, EmployeeType, Attendance, Sale } from '../types';
 import { DataService } from '../services/dataService';
+import { formatDuration, formatTime } from '../utils/formatUtils';
 import EmployeeModal from '../components/modals/EmployeeModal';
 import { Plus, Trash2, Users, User, Briefcase, Banknote, Clock, Calendar, Shield, Edit2, Lock, FileSpreadsheet, ChevronDown, ChevronUp, Filter } from 'lucide-react';
 import ExcelJS from 'exceljs';
@@ -106,7 +107,7 @@ const Employees: React.FC = () => {
         }
         
         if (!editingId) {
-            const password = (formData as any).password;
+            const password = formData.password;
             if (!password || password.length < 6) {
                 alert('يرجى إدخال كلمة مرور مكونة من 6 أحرف على الأقل.');
                 return;
@@ -162,16 +163,6 @@ const Employees: React.FC = () => {
       return next;
     });
   };
-
-  const formatDuration = (mins?: number) => {
-    if (!mins) return 'جاري العمل...';
-    const h = Math.floor(mins / 60);
-    const m = mins % 60;
-    return `${h}س ${m}د`;
-  };
-
-  const formatTime = (iso: string) =>
-    new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
   const getDateRange = (): { from: Date; to: Date } | null => {
     if (customFrom && customTo) return { from: new Date(customFrom), to: new Date(customTo) };
@@ -321,7 +312,7 @@ const Employees: React.FC = () => {
         </div>
         
         <div className="flex bg-white p-1 rounded-lg border border-slate-200">
-            {(['users', 'attendance', 'worklog'] as const).map(tab => {
+            {(['users', 'worklog'] as const).map(tab => {
                 const labels: Record<Tab, string> = { users: 'المستخدمين', worklog: 'سجل العمل' };
                 return (
                     <button key={tab} onClick={() => setActiveTab(tab)}

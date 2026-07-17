@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Menu, Clock, LogOut, Maximize, Minimize, RotateCcw } from 'lucide-react';
 import { Employee, Attendance } from '../../types';
+import { formatDuration } from '../../utils/formatUtils';
 
 interface HeaderProps {
   currentUser: Employee;
@@ -12,12 +13,6 @@ interface HeaderProps {
   onReload: () => void;
   onLogoutClick: () => void;
 }
-
-const formatDuration = (mins: number) => {
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return `${h} س ${m} د`;
-};
 
 const Header: React.FC<HeaderProps> = ({
   currentUser,
@@ -51,6 +46,7 @@ const Header: React.FC<HeaderProps> = ({
       <button
         onClick={() => setIsSidebarOpen(!isSidebarOpen)}
         className="md:hidden p-2 text-slate-600 hover:bg-slate-100 rounded-lg shrink-0"
+        aria-label="فتح القائمة"
       >
         <Menu size={24} />
       </button>
@@ -77,6 +73,7 @@ const Header: React.FC<HeaderProps> = ({
           onClick={onReload}
           className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg transition-colors"
           title="إعادة تحميل النظام"
+          aria-label="إعادة تحميل النظام"
         >
           <RotateCcw size={20} />
         </button>
@@ -85,6 +82,7 @@ const Header: React.FC<HeaderProps> = ({
           onClick={toggleFullscreen}
           className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg transition-colors"
           title={isFullscreen ? "إنهاء ملء الشاشة" : "ملء الشاشة"}
+          aria-label={isFullscreen ? "إنهاء ملء الشاشة" : "ملء الشاشة"}
         >
           {isFullscreen ? <Minimize size={20} /> : <Maximize size={20} />}
         </button>
@@ -94,6 +92,7 @@ const Header: React.FC<HeaderProps> = ({
           onClick={onLogoutClick}
           className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer active:scale-95"
           title="إنهاء الدوام (تسجيل الخروج)"
+          aria-label="تسجيل الخروج"
         >
           <LogOut size={20} />
         </button>

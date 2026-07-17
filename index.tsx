@@ -9,6 +9,10 @@ if (!rootElement) {
 }
 
 // Global error handler for uncaught errors
+function escapeHtml(str: string): string {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 window.addEventListener('error', (event) => {
   event.preventDefault();
   event.stopPropagation();
@@ -39,7 +43,7 @@ window.addEventListener('error', (event) => {
     'Stack Traces:',
     stack || 'لا يوجد Stack'
   ].join('\n');
-  errDiv.innerHTML = `<strong>❌ خطأ غير متوقع:</strong><br><pre style="white-space:pre-wrap;word-break:break-word">${details}</pre>`;
+  errDiv.innerHTML = `<strong>❌ خطأ غير متوقع:</strong><br><pre style="white-space:pre-wrap;word-break:break-word">${escapeHtml(details)}</pre>`;
   document.body.prepend(errDiv);
   console.log('=== ERROR CAPTURED ===');
   console.log('Message:', event.message);
@@ -63,7 +67,7 @@ window.addEventListener('unhandledrejection', (event) => {
   const errDiv = document.createElement('div');
   errDiv.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#fef3c7;color:#92400e;padding:20px;font-family:monospace;font-size:14px;z-index:99999;border-bottom:4px solid #f59e0b;max-height:100vh;overflow:auto';
   const stack = reason?.stack || '';
-  errDiv.innerHTML = `<strong>⚠️ Promise غير معالج:</strong><br><pre style="white-space:pre-wrap;word-break:break-word">${msg}\n\n${stack}</pre>`;
+  errDiv.innerHTML = `<strong>⚠️ Promise غير معالج:</strong><br><pre style="white-space:pre-wrap;word-break:break-word">${escapeHtml(msg)}\n\n${escapeHtml(stack)}</pre>`;
   document.body.prepend(errDiv);
   console.log('=== UNHANDLED REJECTION ===');
   console.log('Reason:', reason);

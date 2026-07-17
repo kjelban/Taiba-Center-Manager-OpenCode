@@ -51,6 +51,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setPage, isOpen, setIsOp
             <div 
                 className="fixed inset-0 bg-black/50 z-40 md:hidden"
                 onClick={() => setIsOpen(false)}
+                aria-label="إغلاق القائمة"
             />
         )}
 
@@ -69,7 +70,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setPage, isOpen, setIsOp
                 </div>
             </div>
 
-            <nav className="mt-6 px-4 space-y-2 flex-1 overflow-y-auto">
+            <nav className="mt-6 px-4 space-y-2 flex-1 overflow-y-auto" aria-label="القائمة الرئيسية">
                 {menuItems.map((item) => {
                     const Icon = item.icon;
                     const isActive = currentPage === item.id;
@@ -87,6 +88,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setPage, isOpen, setIsOp
                                     : 'text-slate-300 hover:bg-slate-800 hover:text-white'
                                 }
                             `}
+                            aria-label={item.label}
                         >
                             <Icon size={20} />
                             <span className="font-medium">{item.label}</span>
@@ -105,6 +107,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setPage, isOpen, setIsOp
                         className={`flex items-center space-x-3 space-x-reverse px-4 py-3 w-full rounded-lg transition-colors
                             ${currentPage === 'settings' ? 'text-white bg-slate-800' : 'text-slate-400 hover:text-white hover:bg-slate-800'}
                         `}
+                        aria-label="الإعدادات"
                     >
                         <Settings size={20} />
                         <span>الإعدادات</span>

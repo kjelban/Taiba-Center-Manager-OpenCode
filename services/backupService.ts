@@ -1,6 +1,6 @@
 import { COLLECTIONS, sanitizeData } from './base';
 import { db } from './firebase';
-import { doc, getDoc, writeBatch } from 'firebase/firestore';
+import { doc, getDoc, getDocs, collection, writeBatch } from 'firebase/firestore';
 import { ProductService } from './productService';
 import { SaleService } from './saleService';
 import { ExpenseService } from './expenseService';
@@ -9,6 +9,8 @@ import { CustomerService } from './customerService';
 import { SupplierService } from './supplierService';
 import { AttendanceService } from './employeeService';
 import { CategoryService } from './categoryService';
+
+const MAX_BATCH_SIZE = 450;
 
 export const BackupService = {
   migrateFromLocalStorage: async (): Promise<boolean> => {
@@ -21,7 +23,6 @@ export const BackupService = {
 
       let batch = writeBatch(db);
       let operationCount = 0;
-      const MAX_BATCH_SIZE = 450;
 
       const commitBatchIfNeeded = async () => {
         if (operationCount >= MAX_BATCH_SIZE) {
@@ -98,10 +99,115 @@ export const BackupService = {
   },
 
   restoreData: async (jsonString: string): Promise<boolean> => {
-    return false;
+    try {
+      const backupData = JSON.parse(jsonString);
+      
+      // Clear existing data first
+      await BackupService.clearAllData();
+      
+      let batch = writeBatch(db);
+      let operationCount = 0;
+
+      const commitBatchIfNeeded = async () => {
+        if (operationCount >= MAX_BATCH_SIZE) {
+          await batch.commit();
+          batch = writeBatch(db);
+          operationCount = 0;
+        }
+      };
+
+      // Helper to write array data
+      const writeArrayData = async (items: any[], collectionName: string) => {
+        if (!Array.isArray(items)) return;
+        for (const item of items) {
+          if (item && item.id) {
+            const docRef = doc(db, collectionName, item.id);
+            batch.set(docRef, sanitizeData(item));
+            operationCount++;
+            await commitBatchIfNeeded();
+          }
+        }
+      };
+
+      // Restore collections
+      await writeArrayData(backupData.products, COLLECTIONS.PRODUCTS);
+      await writeArrayData(backupData.sales, COLLECTIONS.SALES);
+      await writeArrayData(backupData.expenses, COLLECTIONS.EXPENSES);
+      await writeArrayData(backupData.employees, COLLECTIONS.EMPLOYEES);
+      await writeArrayData(backupData.customers, COLLECTIONS.CUSTOMERS);
+      await writeArrayData(backupData.attendance, COLLECTIONS.ATTENDANCE);
+      await writeArrayData(backupData.suppliers, COLLECTIONS.SUPPLIERS);
+
+      // Restore categories (single document)
+      if (backupData.categories && Array.isArray(backupData.categories)) {
+        batch.set(doc(db, COLLECTIONS.CATEGORIES, 'all'), { items: backupData.categories });
+        operationCount++;
+        await commitBatchIfNeeded();
+      }
+
+      // Restore seasons (single document)
+      if (backupData.seasons && Array.isArray(backupData.seasons)) {
+        batch.set(doc(db, COLLECTIONS.SEASONS, 'all'), { items: backupData.seasons });
+        operationCount++;
+        await commitBatchIfNeeded();
+      }
+
+      // Commit any remaining operations
+      if (operationCount > 0) {
+        await batch.commit();
+      }
+
+      console.log("Data restored successfully from backup");
+      return true;
+    } catch (error) {
+      console.error("Restore failed", error);
+      return false;
+    }
   },
 
   clearAllData: async (): Promise<void> => {
-    console.warn("Clear all data is disabled in cloud mode.");
+    try {
+      const collectionsToClear = [
+        COLLECTIONS.PRODUCTS,
+        COLLECTIONS.SALES,
+        COLLECTIONS.EXPENSES,
+        COLLECTIONS.EMPLOYEES,
+        COLLECTIONS.CUSTOMERS,
+        COLLECTIONS.SUPPLIERS,
+        COLLECTIONS.ATTENDANCE,
+        COLLECTIONS.CATEGORIES,
+        COLLECTIONS.SEASONS,
+        COLLECTIONS.METADATA,
+      ];
+
+      let batch = writeBatch(db);
+      let operationCount = 0;
+
+      const commitBatchIfNeeded = async () => {
+        if (operationCount >= MAX_BATCH_SIZE) {
+          await batch.commit();
+          batch = writeBatch(db);
+          operationCount = 0;
+        }
+      };
+
+      for (const collectionName of collectionsToClear) {
+        const snapshot = await getDocs(collection(db, collectionName));
+        for (const docSnap of snapshot.docs) {
+          batch.delete(doc(db, collectionName, docSnap.id));
+          operationCount++;
+          await commitBatchIfNeeded();
+        }
+      }
+
+      if (operationCount > 0) {
+        await batch.commit();
+      }
+
+      console.log("All data cleared successfully");
+    } catch (error) {
+      console.error("Clear all data failed", error);
+      throw error;
+    }
   },
 };

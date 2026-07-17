@@ -11,11 +11,12 @@ import {
 } from 'recharts';
 import { DataService } from '../services/dataService';
 import { DollarSign, AlertTriangle, TrendingUp, Package, Users } from 'lucide-react';
+import { COLORS } from '../utils/formatUtils';
 
 const Dashboard: React.FC = () => {
   const [stats, setStats] = useState({
     dailySales: 0,
-    monthlyProfit: 0,
+    totalProfit: 0,
     lowStockCount: 0,
     totalProducts: 0
   });
@@ -40,7 +41,7 @@ const Dashboard: React.FC = () => {
 
       setStats({
         dailySales: todaySales,
-        monthlyProfit: totalProfit, 
+        totalProfit: totalProfit, 
         lowStockCount: lowStock,
         totalProducts: currentProducts.length
       });
@@ -101,8 +102,6 @@ const Dashboard: React.FC = () => {
     };
   }, []);
 
-  const COLORS = ['#0d9488', '#0f766e', '#115e59', '#134e4a', '#f59e0b'];
-
   return (
     <div className="p-6 space-y-6">
       <header className="mb-8">
@@ -120,7 +119,7 @@ const Dashboard: React.FC = () => {
         />
         <StatCard 
           title="إجمالي الأرباح" 
-          value={`${stats.monthlyProfit} د.ل`} 
+          value={`${stats.totalProfit} د.ل`} 
           icon={<TrendingUp className="text-white" />} 
           color="bg-blue-500" 
         />
@@ -168,20 +167,23 @@ const Dashboard: React.FC = () => {
                 المنتجات الأكثر مبيعاً
             </h3>
             <div className="space-y-4">
-                {topProducts.map((p, idx) => (
+                {topProducts.map((p, idx) => {
+                    const maxCount = topProducts.length > 0 ? topProducts[0].count : 1;
+                    return (
                     <div key={idx} className="flex items-center justify-between">
                         <span className="text-slate-600 font-medium">{idx + 1}. {p.name}</span>
                         <div className="flex items-center gap-2">
                             <div className="w-32 h-2 bg-slate-100 rounded-full overflow-hidden">
                                 <div 
                                     className="h-full bg-primary" 
-                                    style={{ width: `${(p.count / topProducts[0].count) * 100}%` }}
+                                    style={{ width: `${(p.count / maxCount) * 100}%` }}
                                 ></div>
                             </div>
                             <span className="text-xs font-bold text-slate-500 w-8">{p.count}</span>
                         </div>
                     </div>
-                ))}
+                    );
+                })}
             </div>
         </div>
 

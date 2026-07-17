@@ -1,7 +1,7 @@
 import { Employee, Attendance } from '../types';
 import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection } from './base';
 import { db } from './firebase';
-import { doc, getDoc } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
 
 export const EmployeeService = {
   getEmployees: async (): Promise<Employee[]> => {
@@ -53,10 +53,11 @@ export const AttendanceService = {
 
   autoCloseOpenSessions: async (employeeId?: string): Promise<void> => {
     try {
-      const allRecords = await AttendanceService.getAttendance();
+      const q = query(collection(db, COLLECTIONS.ATTENDANCE), where('checkOutTime', '==', null));
+      const snapshot = await getDocs(q);
       const now = Date.now();
-      for (const record of allRecords) {
-        if (record.checkOutTime) continue;
+      for (const docSnap of snapshot.docs) {
+        const record = docSnap.data() as Attendance;
         if (employeeId && record.employeeId !== employeeId) continue;
         const checkIn = new Date(record.checkInTime).getTime();
         if ((now - checkIn) > 12 * 60 * 60 * 1000) {
@@ -64,6 +65,28 @@ export const AttendanceService = {
         }
       }
     } catch { }
+  },
+
+  getActiveSession: async (employeeId: string): Promise<Attendance | null> => {
+    try {
+      const q = query(
+        collection(db, COLLECTIONS.ATTENDANCE),
+        where('employeeId', '==', employeeId),
+        where('checkOutTime', '==', null)
+      );
+      const snapshot = await getDocs(q);
+      if (snapshot.empty) return null;
+      let latest: Attendance | null = null;
+      for (const docSnap of snapshot.docs) {
+        const record = docSnap.data() as Attendance;
+        if (!latest || record.checkInTime > latest.checkInTime) {
+          latest = record;
+        }
+      }
+      return latest;
+    } catch {
+      return null;
+    }
   },
 
   clockIn: async (employee: Employee): Promise<Attendance> => {

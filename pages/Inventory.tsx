@@ -3,12 +3,19 @@ import { Product } from '../types';
 import { DataService } from '../services/dataService';
 import ProductModal from '../components/modals/ProductModal';
 import { GeminiService } from '../services/geminiService';
+import { useDebounce } from '../utils/useDebounce';
 import { Search, Plus, Edit2, Trash, AlertCircle, Loader2, Printer } from 'lucide-react';
 import Barcode from 'react-barcode';
+
+function escHtml(str: string | number | undefined | null): string {
+  if (str === undefined || str === null) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 const Inventory: React.FC = () => {
   const [products, setProducts] = useState<Product[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearch = useDebounce(searchTerm, 300);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [loadingAi, setLoadingAi] = useState(false);
@@ -43,10 +50,10 @@ const Inventory: React.FC = () => {
   };
 
   const filteredProducts = products.filter(p => 
-    p.name.includes(searchTerm) || 
-    p.category.includes(searchTerm) ||
-    p.id.includes(searchTerm) ||
-    (p.barcode && p.barcode.includes(searchTerm))
+    p.name.includes(debouncedSearch) || 
+    p.category.includes(debouncedSearch) ||
+    p.id.includes(debouncedSearch) ||
+    (p.barcode && p.barcode.includes(debouncedSearch))
   );
 
   const handleOpenModal = (product?: Product) => {
@@ -111,7 +118,7 @@ const Inventory: React.FC = () => {
       printWindow.document.write(`
         <html>
           <head>
-            <title>طباعة باركود - ${product.name}</title>
+            <title>طباعة باركود - ${escHtml(product.name)}</title>
             <style>
               body { font-family: 'Tajawal', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px; text-align: center; }
               .label { border: 1px dashed #ccc; padding: 10px; border-radius: 8px; width: 100%; max-width: 300px; }
@@ -125,13 +132,13 @@ const Inventory: React.FC = () => {
           <body>
             <div class="label">
               <h3>طيبة سنتر</h3>
-              <p>${product.name}</p>
-              <p>${product.size} | ${product.color}</p>
+              <p>${escHtml(product.name)}</p>
+              <p>${escHtml(product.size)} | ${escHtml(product.color)}</p>
               <svg id="barcode"></svg>
-              <div class="price">${product.sellingPrice} د.ل</div>
+              <div class="price">${escHtml(product.sellingPrice)} د.ل</div>
             </div>
             <script>
-              JsBarcode("#barcode", "${barcodeValue}", {
+              JsBarcode("#barcode", "${escHtml(barcodeValue)}", {
                 format: "CODE128",
                 width: 1.5,
                 height: 40,

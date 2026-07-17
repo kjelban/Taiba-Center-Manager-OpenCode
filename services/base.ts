@@ -1,11 +1,14 @@
 import { db, auth } from './firebase';
 import { collection, doc, getDocs, getDoc, setDoc, deleteDoc, writeBatch, onSnapshot } from 'firebase/firestore';
 
-const PROXY_PASSWORD = 'admin123';
+function getProxyToken(): string {
+  return (import.meta as any).env.VITE_PROXY_SECRET || '';
+}
 
 async function doFetch(url: string, body: any): Promise<boolean> {
   try {
-    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Proxy-Password': PROXY_PASSWORD }, body: JSON.stringify(body) });
+    const token = getProxyToken();
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Proxy-Token': token }, body: JSON.stringify(body) });
     if (!res.ok) {
       const txt = await res.text().catch(() => '');
       console.warn(`Proxy ${url} returned ${res.status}: ${txt}`);
@@ -25,7 +28,8 @@ async function proxyDelete(collectionName: string, id: string): Promise<boolean>
 }
 async function proxyGet<T>(path: string): Promise<T | null> {
   try {
-    const res = await fetch('/api/proxy/get', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Proxy-Password': PROXY_PASSWORD }, body: JSON.stringify({ path }) });
+    const token = getProxyToken();
+    const res = await fetch('/api/proxy/get', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Proxy-Token': token }, body: JSON.stringify({ path }) });
     return res.ok ? (await res.json() as T) : null;
   } catch { return null; }
 }
@@ -43,39 +47,10 @@ export enum OperationType {
   WRITE = 'write',
 }
 
-export interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
-    tenantId?: string | null;
-    providerInfo?: { providerId?: string | null; email?: string | null }[];
-  }
-}
-
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData?.map(provider => ({
-        providerId: provider.providerId,
-        email: provider.email,
-      })) || []
-    },
-    operationType,
-    path
-  };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  console.error(`Firestore Error [${operationType}] at ${path}: ${errorMessage}`);
+  throw new Error(`Firestore operation failed: ${errorMessage}`);
 }
 
 export const COLLECTIONS = {
@@ -142,5 +117,3 @@ export function subscribeToCollection<T>(collectionName: string, callback: (data
     handleFirestoreError(error, OperationType.LIST, collectionName);
   });
 }
-
-export const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));

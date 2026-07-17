@@ -2,11 +2,13 @@
 import React, { useState, useEffect } from 'react';
 import { Customer } from '../types';
 import { DataService } from '../services/dataService';
+import { useDebounce } from '../utils/useDebounce';
 import { Plus, Search, Trash2, Edit2, Phone, User, ShoppingBag, AlertTriangle } from 'lucide-react';
 
 const Customers: React.FC = () => {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearch = useDebounce(searchTerm, 300);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   
@@ -60,7 +62,7 @@ const Customers: React.FC = () => {
   };
 
   const filteredCustomers = customers.filter(c => 
-    c.name.includes(searchTerm) || c.phone.includes(searchTerm)
+    c.name.includes(debouncedSearch) || c.phone.includes(debouncedSearch)
   );
 
   return (

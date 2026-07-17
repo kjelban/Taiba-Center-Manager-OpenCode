@@ -38,8 +38,14 @@ export interface Product {
   barcode?: string;
 }
 
-export interface CartItem extends Product {
+export interface CartItem {
+  id: string;
+  name: string;
   quantity: number;
+  sellingPrice: number;
+  purchasePrice: number;
+  size?: string;
+  color?: string;
   isManualItem?: boolean;
 }
 

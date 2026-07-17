@@ -6,9 +6,11 @@ import Header from './components/layout/Header';
 import LogoutModal from './components/modals/LogoutModal';
 import DebtAlertModal from './components/modals/DebtAlertModal';
 import ErrorBoundary from './components/ErrorBoundary';
-import { Employee, Attendance, Sale } from './types';
+import { Sale } from './types';
 import { DataService } from './services/dataService';
-import { EmployeeService, AttendanceService } from './services/employeeService';
+import { AuthProvider, useAuth } from './components/providers/AuthProvider';
+import { SessionProvider, useSession } from './components/providers/SessionProvider';
+import { DebtAlertProvider, useDebtAlert } from './components/providers/DebtAlertProvider';
 
 // Directly import Dashboard (no lazy - it's the initial page after login)
 import Dashboard from './pages/Dashboard';
@@ -22,57 +24,14 @@ const Settings = lazy(() => import('./pages/Settings'));
 const Invoices = lazy(() => import('./pages/Invoices'));
 const Customers = lazy(() => import('./pages/Customers'));
 
-const App: React.FC = () => {
+const AuthenticatedApp: React.FC = () => {
+  const { currentUser, handleLogin, confirmLogout, setCurrentUser } = useAuth();
+  const { currentSession, setCurrentSession } = useSession();
+  const { isDebtAlertOpen, setIsDebtAlertOpen, overdueSales, handleSnooze, handleSettleDebtFromAlert, handleRescheduleDebt } = useDebtAlert();
+  
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isInitialLoading, setIsInitialLoading] = useState(true);
-  
-  // User Session State - store only IDs in localStorage
-  const [currentUser, setCurrentUser] = useState<Employee | null>(null);
-  const [currentSession, setCurrentSession] = useState<Attendance | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
-
-  // Load user from stored ID on mount
-  useEffect(() => {
-    const loadUser = async () => {
-      const userId = localStorage.getItem('taiba_user_id');
-      const sessionData = localStorage.getItem('taiba_current_session');
-      const explicitSignOut = localStorage.getItem('explicitlySignedOut');
-
-      if (userId) {
-        const employee = await EmployeeService.getEmployee(userId);
-        if (employee) {
-          setCurrentUser(employee);
-
-          // If previous session was still open, close it first
-          if (sessionData && !explicitSignOut) {
-            try {
-              const session = JSON.parse(sessionData);
-              if (!session.checkOutTime) {
-                await AttendanceService.clockOut(session.id);
-              }
-            } catch {}
-          }
-          localStorage.removeItem('taiba_current_session');
-          localStorage.removeItem('explicitlySignedOut');
-
-          // Auto-create a new session so sales are tracked
-          try {
-            const newSession = await AttendanceService.clockIn(employee);
-            setCurrentSession(newSession);
-            localStorage.setItem('taiba_current_session', JSON.stringify(newSession));
-          } catch {}
-        } else {
-          localStorage.removeItem('taiba_user_id');
-          localStorage.removeItem('taiba_current_session');
-        }
-      }
-      // Close any stale sessions across all employees
-      await AttendanceService.autoCloseOpenSessions();
-      setIsInitialLoading(false);
-    };
-    loadUser();
-  }, []);
 
   // Logout Modal State
   const [isLogoutModalOpen, setIsLogoutModalOpen] = useState(false);
@@ -80,19 +39,20 @@ const App: React.FC = () => {
   // Invoice Editing State
   const [invoiceToEdit, setInvoiceToEdit] = useState<Sale | null>(null);
 
-  // Debt Alert State
-  const [isDebtAlertOpen, setIsDebtAlertOpen] = useState(false);
-  const [overdueSales, setOverdueSales] = useState<Sale[]>([]);
-  
-  // Snooze Logic - Persisted in LocalStorage to survive refreshes
-  const [snoozeUntil, setSnoozeUntil] = useState<number>(() => {
-    const saved = localStorage.getItem('taiba_snooze_until');
-    return saved ? Number(saved) : 0;
-  }); 
-  const [snoozeDuration, setSnoozeDuration] = useState<number>(30); // Default minutes
-
-  // Reschedule State (Temporary for input)
-  const [rescheduleId, setRescheduleId] = useState<string | null>(null);
+  // Sync session from localStorage when user loads
+  useEffect(() => {
+    if (currentUser && !currentSession) {
+      const sessionData = localStorage.getItem('taiba_current_session');
+      if (sessionData) {
+        try {
+          setCurrentSession(JSON.parse(sessionData));
+        } catch {}
+      }
+    }
+    if (!currentUser) {
+      setCurrentSession(null);
+    }
+  }, [currentUser, currentSession, setCurrentSession]);
 
   // Migration Effect
   useEffect(() => {
@@ -105,7 +65,6 @@ const App: React.FC = () => {
     }
   }, [currentUser]);
 
-  // Timer Effect
   // Handle Fullscreen changes
   useEffect(() => {
       const handleFsChange = () => {
@@ -115,112 +74,29 @@ const App: React.FC = () => {
       return () => document.removeEventListener('fullscreenchange', handleFsChange);
   }, []);
 
-  // Auto clock-out on page close/refresh
-  useEffect(() => {
-    if (!currentSession?.id) return;
-    const handleBeforeUnload = () => {
-      const blob = new Blob([JSON.stringify({ id: currentSession.id })], { type: 'application/json' });
-      navigator.sendBeacon('/api/clockout', blob);
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [currentSession?.id]);
-
-  // Persist Snooze Time change
-  useEffect(() => {
-      localStorage.setItem('taiba_snooze_until', snoozeUntil.toString());
-  }, [snoozeUntil]);
-
-  // Debt Checking Logic (Recurring)
-  useEffect(() => {
-    if (!currentUser) return;
-
-    const checkDebts = async () => {
-        const now = Date.now();
-        // 1. Check if snoozed
-        if (now < snoozeUntil) return;
-
-        // 2. Check if already open (avoid re-fetching/re-opening while user is interacting)
-        if (isDebtAlertOpen) return;
-
-        const overdue = await DataService.getOverdueSales();
-        if (overdue.length > 0) {
-            setOverdueSales(overdue);
-            setIsDebtAlertOpen(true);
-            
-            // Play notification sound
-            const audio = new Audio('https://www.soundjay.com/buttons/sounds/beep-01a.mp3');
-            audio.play().catch(() => {});
-        }
-    };
-
-    // Check immediately on load/login
-    checkDebts();
-
-    // Check every minute (to catch snooze expiration)
-    const debtInterval = setInterval(checkDebts, 60 * 1000); 
-
-    // Add visibility listener to re-check when user comes back (handles background throttling)
-    const handleVisibilityChange = () => {
-        if (document.visibilityState === 'visible') {
-            checkDebts();
-        }
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-        clearInterval(debtInterval);
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, [currentUser, isDebtAlertOpen, snoozeUntil]);
-
-
-  const handleLogin = useCallback(async (employee: Employee) => {
-    try {
-        const session = await AttendanceService.clockIn(employee);
-        setCurrentUser(employee);
-        setCurrentSession(session);
-        localStorage.setItem('taiba_user_id', employee.id);
-        if (session) {
-            localStorage.setItem('taiba_current_session', JSON.stringify(session));
-        }
-        
-        if (employee.permissions.includes('dashboard')) {
-            setCurrentPage('dashboard');
-        } else if (employee.permissions.length > 0) {
-            setCurrentPage(employee.permissions[0]);
-        }
-    } catch (error) {
-        console.error("Login failed:", error);
-        alert("فشل تسجيل الدخول. يرجى المحاولة مرة أخرى.");
+  const handleLoginWithPage = useCallback(async (employee: any) => {
+    await handleLogin(employee);
+    // Read the session that handleLogin stored in localStorage
+    const sessionData = localStorage.getItem('taiba_current_session');
+    if (sessionData) {
+      try {
+        setCurrentSession(JSON.parse(sessionData));
+      } catch {}
     }
-  }, []);
+    if (employee.permissions.includes('dashboard')) {
+      setCurrentPage('dashboard');
+    } else if (employee.permissions.length > 0) {
+      setCurrentPage(employee.permissions[0]);
+    }
+  }, [handleLogin, setCurrentSession]);
 
-  const confirmLogout = useCallback(async () => {
-    const sessionId = currentSession?.id;
+  const handleLogoutComplete = useCallback(async () => {
     setIsLogoutModalOpen(false);
-    
-    if (sessionId) {
-        try {
-            await AttendanceService.clockOut(sessionId);
-        } catch (e) {
-            console.error("Clock-out error:", e);
-        }
-    }
-    
-    try {
-        localStorage.setItem("explicitlySignedOut", "true");
-        localStorage.removeItem('taiba_user_id');
-        localStorage.removeItem('taiba_current_session');
-    } catch (e) {
-        console.error("Signout error:", e);
-    }
-    
-    setCurrentUser(null);
+    await confirmLogout();
     setCurrentSession(null);
     setCurrentPage('dashboard');
-    setIsSidebarOpen(false); 
-  }, [currentSession?.id]);
+    setIsSidebarOpen(false);
+  }, [confirmLogout, setCurrentSession]);
 
   const handleEditInvoice = useCallback((sale: Sale) => {
     setInvoiceToEdit(sale);
@@ -249,35 +125,9 @@ const App: React.FC = () => {
       setIsSidebarOpen(false);
       setInvoiceToEdit(null);
       setIsDebtAlertOpen(false);
-  }, []);
-
-  const handleSettleDebtFromAlert = useCallback(async (saleId: string) => {
-    await DataService.settleDebt(saleId);
-    const remaining = overdueSales.filter(s => s.id !== saleId);
-    setOverdueSales(remaining);
-    if (remaining.length === 0) {
-        setIsDebtAlertOpen(false);
-    }
-  }, [overdueSales]);
-
-  const handleRescheduleDebt = useCallback(async (saleId: string, newDate: string) => {
-    if (!newDate) return;
-    await DataService.rescheduleDebt(saleId, newDate);
-    const remaining = overdueSales.filter(s => s.id !== saleId);
-    setOverdueSales(remaining);
-    setRescheduleId(null);
-    if (remaining.length === 0) {
-        setIsDebtAlertOpen(false);
-    }
-  }, [overdueSales]);
+  }, [setCurrentUser, setCurrentSession, setIsDebtAlertOpen]);
 
   const handleOpenLogoutModal = useCallback(() => setIsLogoutModalOpen(true), []);
-
-  const handleSnooze = useCallback((dur: number) => {
-    setSnoozeDuration(dur);
-    setSnoozeUntil(Date.now() + (dur * 60 * 1000));
-    setIsDebtAlertOpen(false);
-  }, []);
 
   const renderPage = () => {
     if (currentUser && !currentUser.permissions.includes(currentPage) && currentPage !== 'settings') {
@@ -297,20 +147,8 @@ const App: React.FC = () => {
     }
   };
 
-  if (isInitialLoading) {
-    return (
-      <div className="fixed inset-0 bg-slate-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-white text-lg font-bold">طيبة سنتر</p>
-          <p className="text-slate-400 text-sm">جاري التحميل...</p>
-        </div>
-      </div>
-    );
-  }
-
   if (!currentUser) {
-    return <UserLogin onLogin={handleLogin} />;
+    return <UserLogin onLogin={handleLoginWithPage} />;
   }
 
   return (
@@ -347,7 +185,7 @@ const App: React.FC = () => {
       <LogoutModal 
         isOpen={isLogoutModalOpen}
         onClose={() => setIsLogoutModalOpen(false)}
-        onConfirm={confirmLogout}
+        onConfirm={handleLogoutComplete}
       />
 
       <DebtAlertModal 
@@ -360,4 +198,24 @@ const App: React.FC = () => {
     </div>
   );
 };
+
+const App: React.FC = () => {
+  return (
+    <AuthProvider>
+      <SessionProvider>
+        <DebtAlertProviderWrapper />
+      </SessionProvider>
+    </AuthProvider>
+  );
+};
+
+const DebtAlertProviderWrapper: React.FC = () => {
+  const { currentUser } = useAuth();
+  return (
+    <DebtAlertProvider currentUser={currentUser}>
+      <AuthenticatedApp />
+    </DebtAlertProvider>
+  );
+};
+
 export default App;

@@ -9,6 +9,20 @@ import fs from "fs";
 // ---- Firestore REST API proxy (bypasses restrictive security rules) ----
 const FIRESTORE_DB_PATH = "projects/adroit-weaver-v6tp2/databases/ai-studio-taibacentermanag-c767774a-873a-4b8d-81a6-1c3761dba0ea";
 
+// Allowed collections whitelist - prevents writing to arbitrary collections
+const ALLOWED_COLLECTIONS = new Set([
+  'products', 'sales', 'expenses', 'employees', 'customers',
+  'suppliers', 'categories', 'seasons', 'attendance', 'metadata'
+]);
+
+function isValidCollection(name: string): boolean {
+  return typeof name === 'string' && ALLOWED_COLLECTIONS.has(name);
+}
+
+function isValidDocumentId(id: string): boolean {
+  return typeof id === 'string' && id.length > 0 && id.length <= 128 && /^[a-zA-Z0-9_\-]+$/.test(id);
+}
+
 function jsToFirestoreValue(val: any): any {
   if (val === null || val === undefined) return { nullValue: null };
   const t = typeof val;
@@ -89,7 +103,6 @@ async function firestoreGetDocument(path: string) {
 async function firestoreSetDocument(collection: string, id: string, data: any) {
   const token = await getGoogleAccessToken();
   const body = { fields: jsToFirestoreValue(data).mapValue.fields };
-  // Try update first (PUT) — returns 404 if doc doesn't exist
   let resp = await fetch(
     `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${collection}/${id}`,
     { method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }
@@ -122,8 +135,35 @@ async function startServer() {
   // Security Headers
   app.set('trust proxy', 1);
   app.use(helmet({
-    contentSecurityPolicy: false,
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        fontSrc: ["'self'", "https://fonts.gstatic.com"],
+        imgSrc: ["'self'", "data:", "https:"],
+        connectSrc: ["'self'"],
+      }
+    },
+    crossOriginEmbedderPolicy: false,
   }));
+
+  // CORS - restrict to known origins
+  const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (ALLOWED_ORIGINS.length === 0) {
+      // In development or when no origins configured, allow all
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    } else if (origin && ALLOWED_ORIGINS.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Proxy-Token');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  });
 
   app.use(express.json({ limit: "10mb" }));
 
@@ -163,8 +203,10 @@ async function startServer() {
       console.warn("Failed to load firebase config, authentication verification will fail.");
   }
 
-  // Auth Middleware
-  const requireAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  // ---- Auth Middleware ----
+
+  // Verify Firebase ID token (for Gemini endpoints)
+  const requireFirebaseAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
       const authHeader = req.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
           return res.status(401).json({ error: "Unauthorized" });
@@ -173,7 +215,6 @@ async function startServer() {
       if (!firebaseConfig?.apiKey) {
           return res.status(500).json({ error: "Server authentication misconfigured." });
       }
-      
       try {
           const url = `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`;
           const response = await fetch(url, {
@@ -190,10 +231,30 @@ async function startServer() {
       }
   };
 
-  app.post("/api/clockout", async (req, res) => {
+  // Verify proxy token (for proxy endpoints)
+  const requireProxyAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      const proxyToken = req.headers['x-proxy-token'];
+      const expectedToken = process.env.PROXY_SECRET;
+      if (!expectedToken) {
+          console.error("PROXY_SECRET environment variable is not set!");
+          return res.status(500).json({ error: "Server proxy authentication not configured." });
+      }
+      if (!proxyToken || proxyToken !== expectedToken) {
+          return res.status(401).json({ error: "Unauthorized: Invalid proxy token" });
+      }
+      next();
+  };
+
+  // ---- Public endpoints (no auth required) ----
+
+  app.get("/api/health", (req, res) => res.json({ status: "ok" }));
+
+  // ---- Authenticated endpoints ----
+
+  app.post("/api/clockout", requireProxyAuth, async (req, res) => {
     try {
       const { id } = req.body;
-      if (!id) return res.status(400).json({ error: "Missing record id" });
+      if (!id || !isValidDocumentId(id)) return res.status(400).json({ error: "Missing or invalid record id" });
       const doc = await firestoreGetDocument(`attendance/${id}`);
       if (!doc) return res.status(404).json({ error: "Record not found" });
       if (doc.checkOutTime) return res.json({ ok: true });
@@ -209,9 +270,9 @@ async function startServer() {
     }
   });
 
-  app.get("/api/health", (req, res) => res.json({ status: "ok" }));
+  // ---- Gemini endpoints (Firebase Auth) ----
 
-  app.post("/api/gemini/suggest-price", requireAuth, async (req: express.Request, res: express.Response) => {
+  app.post("/api/gemini/suggest-price", requireFirebaseAuth, async (req: express.Request, res: express.Response) => {
     try {
       const { productName, costPrice, season } = req.body;
       if (!productName || typeof productName !== 'string' || productName.trim() === '') {
@@ -240,7 +301,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/gemini/analyze-business", requireAuth, async (req: express.Request, res: express.Response) => {
+  app.post("/api/gemini/analyze-business", requireFirebaseAuth, async (req: express.Request, res: express.Response) => {
     try {
       const ai = getAI();
       if (!ai) return res.status(500).json({ error: "الذكاء الاصطناعي غير ممكّن حالياً" });
@@ -260,41 +321,69 @@ async function startServer() {
     }
   });
 
-  // ---- Firestore proxy endpoints (bypass restrictive security rules) ----
-  app.post("/api/proxy/set", async (req, res) => {
+  // ---- Firestore proxy endpoints (require proxy auth + collection validation) ----
+
+  app.post("/api/proxy/set", requireProxyAuth, async (req, res) => {
     try {
       const { collection, id, data } = req.body;
       if (!collection || !id || !data) return res.status(400).json({ error: "Missing collection, id, or data" });
+      if (!isValidCollection(collection)) return res.status(403).json({ error: "Access denied: invalid collection" });
+      if (!isValidDocumentId(id)) return res.status(400).json({ error: "Invalid document ID format" });
       await firestoreSetDocument(collection, id, data);
       res.json({ ok: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
-  app.post("/api/proxy/delete", async (req, res) => {
+
+  app.post("/api/proxy/delete", requireProxyAuth, async (req, res) => {
     try {
       const { collection, id } = req.body;
       if (!collection || !id) return res.status(400).json({ error: "Missing collection or id" });
+      if (!isValidCollection(collection)) return res.status(403).json({ error: "Access denied: invalid collection" });
+      if (!isValidDocumentId(id)) return res.status(400).json({ error: "Invalid document ID format" });
       await firestoreDeleteDocument(collection, id);
       res.json({ ok: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
-  app.post("/api/proxy/get", async (req, res) => {
+
+  app.post("/api/proxy/get", requireProxyAuth, async (req, res) => {
     try {
       const { path: docPath } = req.body;
-      if (!docPath) return res.status(400).json({ error: "Missing path" });
+      if (!docPath || typeof docPath !== 'string') return res.status(400).json({ error: "Missing or invalid path" });
+      // Validate path format: must be "collection/documentId" (no traversal)
+      const pathParts = docPath.split('/');
+      if (pathParts.length !== 2 || !isValidCollection(pathParts[0]) || !isValidDocumentId(pathParts[1])) {
+        return res.status(400).json({ error: "Invalid path format. Expected: collection/documentId" });
+      }
       const doc = await firestoreGetDocument(docPath);
       res.json(doc);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
-  app.post("/api/proxy/batch", async (req, res) => {
+
+  app.post("/api/proxy/batch", requireProxyAuth, async (req, res) => {
     try {
       const { writes } = req.body;
-      if (!Array.isArray(writes)) return res.status(400).json({ error: "Missing writes array" });
+      if (!Array.isArray(writes) || writes.length === 0) return res.status(400).json({ error: "Missing or empty writes array" });
+      if (writes.length > 500) return res.status(400).json({ error: "Batch size exceeds limit (max 500)" });
+
+      // Validate all writes before executing
+      for (const w of writes) {
+        if (!w.collection || !isValidCollection(w.collection)) {
+          return res.status(403).json({ error: `Access denied: invalid collection "${w.collection}"` });
+        }
+        if (!w.id || !isValidDocumentId(w.id)) {
+          return res.status(400).json({ error: `Invalid document ID: "${w.id}"` });
+        }
+        if (w.type !== "set" && w.type !== "delete") {
+          return res.status(400).json({ error: `Invalid write type: "${w.type}"` });
+        }
+      }
+
       const token = await getGoogleAccessToken();
       const batchBody: any = { writes: writes.map((w: any) => {
         if (w.type === "set") {

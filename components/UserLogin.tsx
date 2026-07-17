@@ -36,7 +36,7 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
     if (employees.length === 0) {
         const defaultPassword = import.meta.env.VITE_DEFAULT_ADMIN_PASSWORD || 'admin123';
         if (password !== defaultPassword) {
-            setError(`كلمة المرور الافتراضية للمدير هي ${defaultPassword}`);
+            setError('كلمة المرور غير صحيحة');
             setLoading(false);
             return;
         }
@@ -92,7 +92,7 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
             
             {employees.length === 0 && !loading && (
                 <div className="w-full bg-blue-50 text-blue-800 p-4 rounded-xl mb-6 text-center text-sm border border-blue-100">
-                    جاري إنشاء حساب المدير الافتراضي تلقائياً عند الدخول... (كلمة المرور الافتراضية: {(import.meta as any).env.VITE_DEFAULT_ADMIN_PASSWORD || 'admin123'})
+                    جاري إنشاء حساب المدير الافتراضي تلقائياً عند أول دخول. يرجى تغيير كلمة المرور فوراً من صفحة إدارة المستخدمين.
                 </div>
             )}
             

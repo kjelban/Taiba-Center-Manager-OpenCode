@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Product, CartItem, PaymentMethod, Sale, Employee, Customer, SaleType } from '../types';
 import { DataService } from '../services/dataService';
+import { useDebounce } from '../utils/useDebounce';
 import { Search, ShoppingCart, Trash2, CreditCard, Banknote, Plus, Minus, Check, ScanLine, X, RotateCcw, User, UserPlus, Printer, Clock, Calendar as CalendarIcon, AlertTriangle, PackagePlus } from 'lucide-react';
 import ScannerModal from '../components/pos/ScannerModal';
 import ProductGrid from '../components/pos/ProductGrid';
@@ -20,6 +21,7 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
   const [products, setProducts] = useState<Product[]>([]);
   const [filteredProducts, setFilteredProducts] = useState<Product[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearch = useDebounce(searchTerm, 300);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(PaymentMethod.CASH);
   const [processing, setProcessing] = useState(false);
@@ -91,13 +93,13 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
   useEffect(() => {
     setFilteredProducts(
         products.filter(p => 
-            p.name.includes(searchTerm) || 
-            p.id.includes(searchTerm) || 
-            p.category.includes(searchTerm) ||
-            (p.barcode && p.barcode.includes(searchTerm))
+            p.name.includes(debouncedSearch) || 
+            p.id.includes(debouncedSearch) || 
+            p.category.includes(debouncedSearch) ||
+            (p.barcode && p.barcode.includes(debouncedSearch))
         )
     );
-  }, [searchTerm, products]);
+  }, [debouncedSearch, products]);
   
   // check selected customer's debt
   useEffect(() => {

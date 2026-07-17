@@ -1,5 +1,10 @@
 import { Sale, SaleType, PaymentMethod } from '../types';
 
+function escHtml(str: string | number | undefined | null): string {
+  if (str === undefined || str === null) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 export const printReceipt = (sale: Sale) => {
     const printWindow = window.open('', '', 'width=350,height=700');
     if (!printWindow) return;
@@ -202,27 +207,27 @@ export const printReceipt = (sale: Sale) => {
             <table class="meta-table">
                 <tr>
                     <td class="meta-label">رقم الفاتورة:</td>
-                    <td class="meta-value">#${sale.id}</td>
+                    <td class="meta-value">#${escHtml(sale.id)}</td>
                 </tr>
                 <tr>
                     <td class="meta-label">تاريخ الإصدار:</td>
-                    <td class="meta-value">${formattedDate}</td>
+                    <td class="meta-value">${escHtml(formattedDate)}</td>
                 </tr>
                 <tr>
                     <td class="meta-label">وقت الإصدار:</td>
-                    <td class="meta-value">${formattedTime}</td>
+                    <td class="meta-value">${escHtml(formattedTime)}</td>
                 </tr>
                 <tr>
                     <td class="meta-label">الموظف:</td>
-                    <td class="meta-value">${sale.createdBy}</td>
+                    <td class="meta-value">${escHtml(sale.createdBy)}</td>
                 </tr>
                 <tr>
                     <td class="meta-label">العميل:</td>
-                    <td class="meta-value">${sale.customerName || 'عميل سريع'}</td>
+                    <td class="meta-value">${escHtml(sale.customerName || 'عميل سريع')}</td>
                 </tr>
                 <tr>
                     <td class="meta-label">طريقة الدفع:</td>
-                    <td class="meta-value">${sale.paymentMethod}</td>
+                    <td class="meta-value">${escHtml(sale.paymentMethod)}</td>
                 </tr>
             </table>
 
@@ -241,11 +246,11 @@ export const printReceipt = (sale: Sale) => {
                     ${sale.items.map(item => `
                         <tr>
                             <td>
-                                <div class="item-name">${item.name}</div>
-                                <div class="item-desc">مقاس: ${item.size || '-'} | لون: ${item.color || '-'}</div>
+                                <div class="item-name">${escHtml(item.name)}</div>
+                                <div class="item-desc">مقاس: ${escHtml(item.size)} | لون: ${escHtml(item.color)}</div>
                             </td>
-                            <td style="text-align: center; font-weight: 500;">${item.quantity}</td>
-                            <td style="text-align: left; color: #4b5563;">${item.sellingPrice}</td>
+                            <td style="text-align: center; font-weight: 500;">${escHtml(item.quantity)}</td>
+                            <td style="text-align: left; color: #4b5563;">${escHtml(item.sellingPrice)}</td>
                             <td style="text-align: left; font-weight: 700;">${Math.abs(item.sellingPrice * item.quantity)} د.ل</td>
                         </tr>
                     `).join('')}

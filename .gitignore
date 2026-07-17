@@ -14,6 +14,16 @@ dist-ssr
 
 # Environment & secrets
 .env
+.env.local
+.env.*.local
+
+# Firebase config (may contain API keys)
+firebase-applet-config.json
+firebase-blueprint.json
+
+# Build outputs
+dist/
+dist-ssr/
 
 # Editor directories and files
 .vscode/*

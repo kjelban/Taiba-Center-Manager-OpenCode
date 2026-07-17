@@ -26,7 +26,6 @@ export default defineConfig(({ mode }) => {
               'recharts': ['recharts'],
               'lucide': ['lucide-react'],
               'firebase': ['firebase/app', 'firebase/firestore', 'firebase/auth'],
-              'vendor': ['react', 'react-dom', 'react-router-dom'],
               'exceljs': ['exceljs']
             }
           }

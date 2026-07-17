@@ -2,7 +2,7 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function isSignedIn() {
-      return true;
+      return request.auth != null && request.auth.uid != null;
     }
 
     function isValidId(id) {
@@ -18,10 +18,11 @@ service cloud.firestore {
     }
 
     function isValidProduct(data) {
-      return data.keys().hasAll(['id', 'name', 'costPrice', 'sellingPrice', 'stock']) &&
+      return data.keys().hasAll(['id', 'name', 'sellingPrice', 'stock']) &&
         data.id is string && data.id.size() <= 128 &&
         data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
-        data.costPrice is number && data.costPrice >= 0 &&
+        (data.get('purchasePrice', 0) is number || data.get('costPrice', 0) is number) &&
+        (data.get('purchasePrice', -1) >= 0 || data.get('costPrice', -1) >= 0) &&
         data.sellingPrice is number && data.sellingPrice >= 0 &&
         data.stock is number && data.stock >= 0 &&
         (data.get('barcode', '') is string) && (data.get('barcode', '').size() <= 100) &&
@@ -55,12 +56,12 @@ service cloud.firestore {
     }
 
     function isValidExpense(data) {
-      return data.keys().hasAll(['id', 'description', 'amount', 'date', 'type']) &&
+      return data.keys().hasAll(['id', 'description', 'amount', 'date', 'category']) &&
         data.id is string && data.id.size() <= 128 &&
         data.description is string && data.description.size() <= 500 &&
         data.amount is number && data.amount > 0 &&
         data.date is string && data.date.size() <= 50 &&
-        data.type is string && data.type.size() <= 100;
+        data.category is string && data.category.size() <= 100;
     }
 
     function isValidEmployee(data) {
@@ -71,8 +72,7 @@ service cloud.firestore {
         data.role is string && data.role.size() <= 100 &&
         data.type is string && data.type.size() <= 50 &&
         data.salary is number && data.salary >= 0 &&
-        data.permissions is list && data.permissions.size() >= 0 && data.permissions.size() <= 50 &&
-        (data.get('password', '') is string);
+        data.permissions is list && data.permissions.size() >= 0 && data.permissions.size() <= 50;
     }
 
     function isValidCustomer(data) {

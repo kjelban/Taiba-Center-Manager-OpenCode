@@ -27,7 +27,7 @@ const EmployeeModal: React.FC<EmployeeModalProps> = ({
 
     return (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl max-h-[90vh] overflow-y-auto" role="dialog" aria-modal="true">
                 <form onSubmit={onSave} className="p-6">
                     <h3 className="text-xl font-bold mb-6 text-slate-800">
                         {editingId ? 'تعديل بيانات المستخدم' : 'إضافة مستخدم جديد'}
@@ -62,7 +62,7 @@ const EmployeeModal: React.FC<EmployeeModalProps> = ({
                             <div className="relative">
                                 <input 
                                     required={!editingId}
-                                    type="text"
+                                    type="password"
                                     className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none pl-10"
                                     placeholder={editingId ? "اتركها فارغة لعدم التغيير" : "أدخل كلمة المرور (6 أحرف على الأقل)"}
                                     value={formData.password || ''}
