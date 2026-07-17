@@ -160,10 +160,13 @@ async function startServer() {
     crossOriginEmbedderPolicy: false,
   }));
 
-  // CORS - restrict to known origins
+  // CORS - restrict to known origins (API routes only; static files are same-origin)
   const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
   const isProduction = process.env.NODE_ENV === 'production';
   app.use((req, res, next) => {
+    // Skip CORS for non-API requests (static assets, index.html, etc.)
+    if (!req.path.startsWith('/api/')) return next();
+
     const origin = req.headers.origin;
     if (ALLOWED_ORIGINS.length === 0) {
       if (isProduction) {
