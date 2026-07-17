@@ -2,13 +2,17 @@ import React from 'react';
 import { Lock, Shield } from 'lucide-react';
 import { Employee, EmployeeType } from '../../types';
 
+interface EmployeeFormData extends Partial<Employee> {
+    password?: string;
+}
+
 interface EmployeeModalProps {
     isOpen: boolean;
     onClose: () => void;
     onSave: (e: React.FormEvent) => void;
     editingId: string | null;
-    formData: Partial<Employee>;
-    setFormData: (data: Partial<Employee>) => void;
+    formData: EmployeeFormData;
+    setFormData: (data: EmployeeFormData) => void;
     availablePermissions: { id: string, label: string }[];
     togglePermission: (id: string) => void;
 }
@@ -57,22 +61,24 @@ const EmployeeModal: React.FC<EmployeeModalProps> = ({
                             />
                         </div>
                         
+                    {!editingId && (
                         <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">{editingId ? 'تغيير كلمة المرور' : 'كلمة المرور'}</label>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">كلمة المرور</label>
                             <div className="relative">
                                 <input 
-                                    required={!editingId}
+                                    required
                                     type="password"
                                     className="w-full bg-white text-slate-900 border border-slate-300 rounded-lg p-2.5 outline-none pl-10"
-                                    placeholder={editingId ? "اتركها فارغة لعدم التغيير" : "أدخل كلمة المرور (6 أحرف على الأقل)"}
+                                    placeholder="أدخل كلمة المرور (6 أحرف على الأقل)"
                                     value={formData.password || ''}
                                     onChange={e => setFormData({...formData, password: e.target.value})}
                                     dir="ltr"
                                 />
                                 <Lock size={16} className="absolute left-3 top-3 text-slate-400" />
                             </div>
-                            <p className="text-xs text-slate-500 mt-1">يتم استخدامها لتسجيل دخول الموظف، ويجب ألا تقل عن 6 أحرف.</p>
+                            <p className="text-xs text-slate-500 mt-1">تُستخدم لتسجيل دخول الموظف، ويجب ألا تقل عن 6 أحرف.</p>
                         </div>
+                    )}
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">المسمى الوظيفي</label>
                             <input 

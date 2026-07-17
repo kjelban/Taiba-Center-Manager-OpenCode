@@ -187,11 +187,12 @@ const diffMs = now.getTime() - new Date(doc.checkInTime).getTime();
 ```
 **المشكلة**: `doc.checkInTime` يُفترض أنه `string` ولكن القادمة من Firestore عبر REST API قد تكون بصيغ مختلفة.
 
-#### 6. `UserLogin.tsx:37` - كلمة مرور افتراضية ثابتة
+#### 6. `UserLogin.tsx:37` - ~~كلمة مرور افتراضية ثابتة~~ [تم الإصلاح]
 ```tsx
-const defaultPassword = import.meta.env.VITE_DEFAULT_ADMIN_PASSWORD || 'admin123';
+// تم نقل الإعداد الأولي إلى نقطة نهاية سيرفر /api/admin/bootstrap
+// كلمة المرور تُتحقق منها على السيرفر عبر BOOTSTRAP_PASSWORD
 ```
-**الخطورة**: **Critical** - إذا لم يتم تعيين `VITE_DEFAULT_ADMIN_PASSWORD` في البيئة، تُستخدم `admin123` ككلمة مرور افتراضية.
+**الحالة**: تم الإصلاح - كلمة المرور لم تعد تظهر في الكود المصدري للعميل.
 
 #### 7. `saleService.ts:18-29` - تحديث غير ذري (Non-Atomic)
 ```tsx

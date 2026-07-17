@@ -1,13 +1,34 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // ── Auth helpers ──
+
     function isSignedIn() {
       return request.auth != null && request.auth.uid != null;
     }
 
-    function isValidId(id) {
-      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    function employeeExists() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/employees/$(request.auth.uid));
     }
+
+    function getEmployee() {
+      return get(/databases/$(database)/documents/employees/$(request.auth.uid));
+    }
+
+    function hasPermission(perm) {
+      return employeeExists() &&
+        getEmployee().data.permissions.hasAny([perm]);
+    }
+
+    function isAdmin() {
+      return employeeExists() && (
+        getEmployee().data.permissions.hasAny(['employees', 'settings'])
+      );
+    }
+
+    // ── Validation helpers ──
 
     function incoming() {
       return request.resource.data;
@@ -92,7 +113,7 @@ service cloud.firestore {
         (data.get('phone', '') is string) && (data.get('phone', '').size() <= 20) &&
         (data.get('company', '') is string) && (data.get('company', '').size() <= 100);
     }
-    
+
     function isValidAttendance(data) {
       return data.keys().hasAll(['id', 'employeeId', 'employeeName', 'date', 'checkInTime']) &&
         data.id is string && data.id.size() <= 128 &&
@@ -110,74 +131,81 @@ service cloud.firestore {
              (data.get('items', []) is list) && (data.get('items', []).size() <= 1000);
     }
 
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'timestamp', 'eventType', 'userId']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.timestamp is string && data.timestamp.size() <= 50 &&
+        data.eventType is string && data.eventType.size() > 0 && data.eventType.size() <= 50 &&
+        data.userId is string && data.userId.size() <= 128;
+    }
+
+    // ── Collection rules ──
+    //
+    // SECURITY ARCHITECTURE:
+    // All writes are routed through the Express server proxy which:
+    //   1. Verifies Firebase Auth token
+    //   2. Loads employee record and checks permissions
+    //   3. Validates payload schema
+    //   4. Logs audit trail
+    //   5. Writes via Firestore REST API (bypassing rules)
+    //
+    // Client-side Firestore SDK writes are blocked via "allow write: if false".
+    // Client-side Firestore SDK reads are allowed for authenticated users
+    // (reads are non-destructive; sensitive reads go through server endpoints).
+
     match /products/{productId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidProduct(incoming());
-      allow update: if isSignedIn() && isValidProduct(incoming());
-      allow delete: if isSignedIn();
+      allow create, update, delete: if false;
     }
 
     match /sales/{saleId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidSale(incoming());
-      allow update: if isSignedIn() && isValidSale(incoming());
-      allow delete: if isSignedIn();
+      allow create, update, delete: if false;
     }
 
     match /expenses/{expenseId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidExpense(incoming());
-      allow update: if isSignedIn() && isValidExpense(incoming());
-      allow delete: if isSignedIn();
+      allow create, update, delete: if false;
     }
 
     match /employees/{employeeId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidEmployee(incoming());
-      allow update: if isSignedIn() && isValidEmployee(incoming());
-      allow delete: if isSignedIn();
+      allow create, update, delete: if false;
     }
 
     match /customers/{customerId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidCustomer(incoming());
-      allow update: if isSignedIn() && isValidCustomer(incoming());
-      allow delete: if isSignedIn();
+      allow create, update, delete: if false;
     }
 
     match /suppliers/{supplierId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidSupplier(incoming());
-      allow update: if isSignedIn() && isValidSupplier(incoming());
-      allow delete: if isSignedIn();
+      allow create, update, delete: if false;
     }
 
     match /attendance/{attendanceId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidAttendance(incoming());
-      allow update: if isSignedIn() && isValidAttendance(incoming());
-      allow delete: if isSignedIn();
+      allow create, update, delete: if false;
     }
 
     match /categories/{categoryId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn();
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn();
+      allow create, update, delete: if false;
     }
 
     match /seasons/{seasonId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn();
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn();
+      allow create, update, delete: if false;
     }
 
     match /metadata/{metadataId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidMetadata(incoming());
-      allow update: if isSignedIn() && isValidMetadata(incoming());
-      allow delete: if isSignedIn();
+      allow create, update, delete: if false;
+    }
+
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow write: if false;
     }
   }
 }

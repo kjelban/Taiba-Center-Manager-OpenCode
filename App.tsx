@@ -52,7 +52,7 @@ const AuthenticatedApp: React.FC = () => {
     if (!currentUser) {
       setCurrentSession(null);
     }
-  }, [currentUser, currentSession, setCurrentSession]);
+  }, [currentUser, setCurrentSession]);
 
   // Migration Effect
   useEffect(() => {
@@ -76,19 +76,14 @@ const AuthenticatedApp: React.FC = () => {
 
   const handleLoginWithPage = useCallback(async (employee: any) => {
     await handleLogin(employee);
-    // Read the session that handleLogin stored in localStorage
-    const sessionData = localStorage.getItem('taiba_current_session');
-    if (sessionData) {
-      try {
-        setCurrentSession(JSON.parse(sessionData));
-      } catch {}
-    }
+    // Session is created asynchronously by onAuthStateChanged after Firebase Auth state changes.
+    // Set page immediately; the SessionProvider will pick up the session when onAuthStateChanged fires.
     if (employee.permissions.includes('dashboard')) {
       setCurrentPage('dashboard');
     } else if (employee.permissions.length > 0) {
       setCurrentPage(employee.permissions[0]);
     }
-  }, [handleLogin, setCurrentSession]);
+  }, [handleLogin]);
 
   const handleLogoutComplete = useCallback(async () => {
     setIsLogoutModalOpen(false);

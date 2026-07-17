@@ -1,14 +1,20 @@
 import { db, auth } from './firebase';
-import { collection, doc, getDocs, getDoc, setDoc, deleteDoc, writeBatch, onSnapshot } from 'firebase/firestore';
+import { collection, getDocs, onSnapshot } from 'firebase/firestore';
 
-function getProxyToken(): string {
-  return (import.meta as any).env.VITE_PROXY_SECRET || '';
+async function getIdToken(): Promise<string> {
+  const user = auth.currentUser;
+  if (!user) throw new Error('Not authenticated');
+  return user.getIdToken();
 }
 
 async function doFetch(url: string, body: any): Promise<boolean> {
   try {
-    const token = getProxyToken();
-    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Proxy-Token': token }, body: JSON.stringify(body) });
+    const token = await getIdToken();
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
     if (!res.ok) {
       const txt = await res.text().catch(() => '');
       console.warn(`Proxy ${url} returned ${res.status}: ${txt}`);
@@ -26,10 +32,14 @@ async function proxySet(collectionName: string, id: string, data: any): Promise<
 async function proxyDelete(collectionName: string, id: string): Promise<boolean> {
   return doFetch('/api/proxy/delete', { collection: collectionName, id });
 }
-async function proxyGet<T>(path: string): Promise<T | null> {
+export async function proxyGet<T>(path: string): Promise<T | null> {
   try {
-    const token = getProxyToken();
-    const res = await fetch('/api/proxy/get', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Proxy-Token': token }, body: JSON.stringify({ path }) });
+    const token = await getIdToken();
+    const res = await fetch('/api/proxy/get', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ path }),
+    });
     return res.ok ? (await res.json() as T) : null;
   } catch { return null; }
 }
@@ -92,21 +102,15 @@ export async function getAll<T>(collectionName: string): Promise<T[]> {
 
 export async function setData(collectionName: string, id: string, data: any): Promise<void> {
   const ok = await proxySet(collectionName, id, data);
-  if (ok) return;
-  try {
-    await setDoc(doc(db, collectionName, id), sanitizeData(data));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `${collectionName}/${id}`);
+  if (!ok) {
+    throw new Error(`Write to ${collectionName}/${id} failed: proxy returned error`);
   }
 }
 
 export async function deleteData(collectionName: string, id: string): Promise<void> {
   const ok = await proxyDelete(collectionName, id);
-  if (ok) return;
-  try {
-    await deleteDoc(doc(db, collectionName, id));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, `${collectionName}/${id}`);
+  if (!ok) {
+    throw new Error(`Delete of ${collectionName}/${id} failed: proxy returned error`);
   }
 }
 

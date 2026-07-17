@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Employee } from '../types';
 import { DataService } from '../services/dataService';
-import { Baby, LogIn, User, Lock } from 'lucide-react';
+import { AuthService } from '../services/authService';
+import { Baby, LogIn, Mail, Lock } from 'lucide-react';
 
 interface UserLoginProps {
   onLogin: (employee: Employee) => void;
@@ -11,14 +12,13 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   
-  const [employees, setEmployees] = useState<Employee[]>([]);
-  const [selectedName, setSelectedName] = useState('');
+  const [hasEmployees, setHasEmployees] = useState(false);
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
 
   useEffect(() => {
     DataService.getEmployees().then(data => {
-        setEmployees(data);
-        if (data.length > 0) setSelectedName(data[0].name);
+        setHasEmployees(data.length > 0);
         setLoading(false);
     }).catch(err => {
         console.error(err);
@@ -27,53 +27,72 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
     });
   }, []);
 
-  const handleLocalLogin = async (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
-    
-    // Auto-create admin if no employees exist
-    if (employees.length === 0) {
-        const defaultPassword = import.meta.env.VITE_DEFAULT_ADMIN_PASSWORD || 'admin123';
-        if (password !== defaultPassword) {
-            setError('كلمة المرور غير صحيحة');
-            setLoading(false);
-            return;
-        }
-        const admin: Employee = {
-            id: crypto.randomUUID(),
-            name: 'المدير العام',
-            email: 'admin@taiba.local',
-            role: 'مدير',
-            type: 'دوام كامل' as any,
-            salary: 0,
-            permissions: ['dashboard', 'pos', 'invoices', 'inventory', 'reports', 'expenses', 'employees', 'settings'],
-            password: defaultPassword
-        };
-        try {
-            await DataService.saveEmployee(admin);
-            onLogin(admin);
-        } catch (err: any) {
-            setError('حدث خطأ أثناء إنشاء حساب المدير: ' + err.message);
-            setLoading(false);
-        }
-        return;
-    }
 
-    const employee = employees.find(e => e.name === selectedName);
-    if (!employee) {
-        setError('يرجى اختيار الموظف');
+      try {
+      if (!hasEmployees) {
+        if (!email) {
+          setError('يرجى إدخال البريد الإلكتروني');
+          setLoading(false);
+          return;
+        }
+        if (!password) {
+          setError('يرجى إدخال كلمة المرور');
+          setLoading(false);
+          return;
+        }
+
+        // Bootstrap: server validates password against BOOTSTRAP_PASSWORD env var
+        const bootstrapResp = await fetch('/api/admin/bootstrap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const bootstrapData = await bootstrapResp.json();
+        if (!bootstrapResp.ok) {
+          setError(bootstrapData.error || 'فشل إنشاء حساب المدير');
+          setLoading(false);
+          return;
+        }
+
+        // Sign in with the newly created account
+        const firebaseUser = await AuthService.signIn(email, password);
+        onLogin(bootstrapData.employee);
+        return;
+      }
+
+      if (!email) {
+        setError('يرجى إدخال البريد الإلكتروني');
         setLoading(false);
         return;
-    }
+      }
 
-    if (employee.password && employee.password !== password) {
-        setError('كلمة المرور غير صحيحة');
+      const firebaseUser = await AuthService.signIn(email, password);
+
+      const employee = (await DataService.getEmployees()).find(e => e.id === firebaseUser.uid);
+      if (!employee) {
+        await AuthService.signOut();
+        setError('الحساب غير موجود في النظام. يرجى التواصل مع المسؤول.');
         setLoading(false);
         return;
-    }
+      }
 
-    onLogin(employee);
+      onLogin(employee);
+    } catch (err: any) {
+        console.error('Login error:', err);
+        const code = err?.code;
+        if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+            setError('البريد الإلكتروني أو كلمة المرور غير صحيحة');
+        } else if (code === 'auth/too-many-requests') {
+            setError('تم حظر الحساب مؤقتاً بسبب محاولات كثيرة. يرجى المحاولة لاحقاً.');
+        } else {
+            setError(err.message || 'حدث خطأ أثناء تسجيل الدخول');
+        }
+        setLoading(false);
+    }
   };
 
   return (
@@ -90,32 +109,28 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
         <div className="p-8">
             {error && <div className="w-full bg-red-50 text-red-600 p-4 rounded-xl mb-6 text-center text-sm border border-red-100 leading-relaxed">{error}</div>}
             
-            {employees.length === 0 && !loading && (
+            {!hasEmployees && !loading && (
                 <div className="w-full bg-blue-50 text-blue-800 p-4 rounded-xl mb-6 text-center text-sm border border-blue-100">
-                    جاري إنشاء حساب المدير الافتراضي تلقائياً عند أول دخول. يرجى تغيير كلمة المرور فوراً من صفحة إدارة المستخدمين.
+                    إعداد أولي: أدخل البريد الإلكتروني وكلمة المرور الإدارية لإنشاء حساب المدير الأول.
                 </div>
             )}
             
-            <form onSubmit={handleLocalLogin} className="space-y-4">
-                {employees.length > 0 && (
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">اسم المستخدم</label>
-                        <div className="relative">
-                            <select 
-                                required
-                                value={selectedName}
-                                onChange={e => setSelectedName(e.target.value)}
-                                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all appearance-none"
-                                dir="rtl"
-                            >
-                                {employees.map(emp => (
-                                    <option key={emp.id} value={emp.name}>{emp.name}</option>
-                                ))}
-                            </select>
-                            <User size={18} className="absolute left-4 top-3.5 text-slate-400" />
-                        </div>
+            <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">البريد الإلكتروني</label>
+                    <div className="relative">
+                        <input 
+                            type="email"
+                            required
+                            value={email}
+                            onChange={e => setEmail(e.target.value)}
+                            className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
+                            dir="ltr"
+                            placeholder="user@taiba.com"
+                        />
+                        <Mail size={18} className="absolute left-4 top-3.5 text-slate-400" />
                     </div>
-                )}
+                </div>
                 
                 <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1">كلمة المرور</label>

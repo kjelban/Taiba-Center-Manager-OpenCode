@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import { Attendance } from '../../types';
+import { auth } from '../../services/firebase';
 
 interface SessionContextType {
   currentSession: Attendance | null;
@@ -44,12 +45,15 @@ export const SessionProvider: React.FC<SessionProviderProps> = ({ children }) =>
   useEffect(() => {
     if (!currentSession?.id) return;
     const handleBeforeUnload = () => {
-      const token = (import.meta as any).env.VITE_PROXY_SECRET || '';
-      fetch('/api/clockout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Proxy-Token': token },
-        body: JSON.stringify({ id: currentSession.id }),
-        keepalive: true,
+      const user = auth.currentUser;
+      if (!user) return;
+      user.getIdToken().then(token => {
+        fetch('/api/clockout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ id: currentSession.id }),
+          keepalive: true,
+        }).catch(() => {});
       }).catch(() => {});
     };
     window.addEventListener('beforeunload', handleBeforeUnload);

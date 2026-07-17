@@ -1,6 +1,3 @@
-import { COLLECTIONS, sanitizeData } from './base';
-import { db } from './firebase';
-import { doc, getDoc, getDocs, collection, writeBatch } from 'firebase/firestore';
 import { ProductService } from './productService';
 import { SaleService } from './saleService';
 import { ExpenseService } from './expenseService';
@@ -10,72 +7,70 @@ import { SupplierService } from './supplierService';
 import { AttendanceService } from './employeeService';
 import { CategoryService } from './categoryService';
 
-const MAX_BATCH_SIZE = 450;
+async function getIdToken(): Promise<string> {
+  const { auth } = await import('./firebase');
+  const user = auth.currentUser;
+  if (!user) throw new Error('Not authenticated');
+  return user.getIdToken();
+}
+
+async function post(endpoint: string, body: any): Promise<any> {
+  const token = await getIdToken();
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`${endpoint} returned ${res.status}: ${txt}`);
+  }
+  return res.json();
+}
 
 export const BackupService = {
   migrateFromLocalStorage: async (): Promise<boolean> => {
     try {
-      const metadataRef = doc(db, COLLECTIONS.METADATA, 'migration_status');
-      const docSnap = await getDoc(metadataRef);
-      if (docSnap.exists() && docSnap.data().migrated) {
-        return false;
-      }
-
-      let batch = writeBatch(db);
-      let operationCount = 0;
-
-      const commitBatchIfNeeded = async () => {
-        if (operationCount >= MAX_BATCH_SIZE) {
-          await batch.commit();
-          batch = writeBatch(db);
-          operationCount = 0;
-        }
-      };
-
       const collectionsToMigrate = [
-        { key: 'taiba_products', name: COLLECTIONS.PRODUCTS },
-        { key: 'taiba_sales', name: COLLECTIONS.SALES },
-        { key: 'taiba_expenses', name: COLLECTIONS.EXPENSES },
-        { key: 'taiba_employees', name: COLLECTIONS.EMPLOYEES },
-        { key: 'taiba_customers', name: COLLECTIONS.CUSTOMERS },
-        { key: 'taiba_suppliers', name: COLLECTIONS.SUPPLIERS },
-        { key: 'taiba_attendance', name: COLLECTIONS.ATTENDANCE }
+        { key: 'taiba_products', name: 'products' },
+        { key: 'taiba_sales', name: 'sales' },
+        { key: 'taiba_expenses', name: 'expenses' },
+        { key: 'taiba_employees', name: 'employees' },
+        { key: 'taiba_customers', name: 'customers' },
+        { key: 'taiba_suppliers', name: 'suppliers' },
+        { key: 'taiba_attendance', name: 'attendance' },
       ];
+
+      const migrationData: Record<string, any[]> = {};
 
       for (const coll of collectionsToMigrate) {
         const stored = localStorage.getItem(coll.key);
         if (stored) {
           const data = JSON.parse(stored);
           if (Array.isArray(data)) {
-            for (const item of data) {
-              if (item && item.id) {
-                const docRef = doc(db, coll.name, item.id);
-                batch.set(docRef, sanitizeData(item));
-                operationCount++;
-                await commitBatchIfNeeded();
-              }
-            }
+            migrationData[coll.name] = data.filter((item: any) => item && item.id);
           }
         }
       }
 
       const categoriesStored = localStorage.getItem('taiba_categories');
       if (categoriesStored) {
-        batch.set(doc(db, COLLECTIONS.CATEGORIES, 'all'), { items: JSON.parse(categoriesStored) });
-        operationCount++;
-        await commitBatchIfNeeded();
+        migrationData.categories = JSON.parse(categoriesStored);
       }
 
       const seasonsStored = localStorage.getItem('taiba_seasons');
       if (seasonsStored) {
-        batch.set(doc(db, COLLECTIONS.SEASONS, 'all'), { items: JSON.parse(seasonsStored) });
-        operationCount++;
-        await commitBatchIfNeeded();
+        migrationData.seasons = JSON.parse(seasonsStored);
       }
 
-      batch.set(metadataRef, { migrated: true, timestamp: new Date().toISOString() });
-      await batch.commit();
-      return true;
+      const hasData = Object.keys(migrationData).some(k => {
+        const v = migrationData[k];
+        return Array.isArray(v) ? v.length > 0 : v !== undefined;
+      });
+      if (!hasData) return false;
+
+      const result = await post('/api/backup/migrate', { data: migrationData });
+      return result.ok === true;
     } catch (error) {
       console.error("Migration failed", error);
       return false;
@@ -101,62 +96,14 @@ export const BackupService = {
   restoreData: async (jsonString: string): Promise<boolean> => {
     try {
       const backupData = JSON.parse(jsonString);
-      
-      // Clear existing data first
-      await BackupService.clearAllData();
-      
-      let batch = writeBatch(db);
-      let operationCount = 0;
+      const hasPreMigrationEmployees = Array.isArray(backupData.employees) &&
+        backupData.employees.some((e: any) => e.password);
 
-      const commitBatchIfNeeded = async () => {
-        if (operationCount >= MAX_BATCH_SIZE) {
-          await batch.commit();
-          batch = writeBatch(db);
-          operationCount = 0;
-        }
-      };
-
-      // Helper to write array data
-      const writeArrayData = async (items: any[], collectionName: string) => {
-        if (!Array.isArray(items)) return;
-        for (const item of items) {
-          if (item && item.id) {
-            const docRef = doc(db, collectionName, item.id);
-            batch.set(docRef, sanitizeData(item));
-            operationCount++;
-            await commitBatchIfNeeded();
-          }
-        }
-      };
-
-      // Restore collections
-      await writeArrayData(backupData.products, COLLECTIONS.PRODUCTS);
-      await writeArrayData(backupData.sales, COLLECTIONS.SALES);
-      await writeArrayData(backupData.expenses, COLLECTIONS.EXPENSES);
-      await writeArrayData(backupData.employees, COLLECTIONS.EMPLOYEES);
-      await writeArrayData(backupData.customers, COLLECTIONS.CUSTOMERS);
-      await writeArrayData(backupData.attendance, COLLECTIONS.ATTENDANCE);
-      await writeArrayData(backupData.suppliers, COLLECTIONS.SUPPLIERS);
-
-      // Restore categories (single document)
-      if (backupData.categories && Array.isArray(backupData.categories)) {
-        batch.set(doc(db, COLLECTIONS.CATEGORIES, 'all'), { items: backupData.categories });
-        operationCount++;
-        await commitBatchIfNeeded();
+      if (hasPreMigrationEmployees) {
+        console.warn("Backup contains pre-migration employees with password fields. Employee IDs may not match Firebase Auth UIDs after restore.");
       }
 
-      // Restore seasons (single document)
-      if (backupData.seasons && Array.isArray(backupData.seasons)) {
-        batch.set(doc(db, COLLECTIONS.SEASONS, 'all'), { items: backupData.seasons });
-        operationCount++;
-        await commitBatchIfNeeded();
-      }
-
-      // Commit any remaining operations
-      if (operationCount > 0) {
-        await batch.commit();
-      }
-
+      await post('/api/backup/restore', { data: backupData });
       console.log("Data restored successfully from backup");
       return true;
     } catch (error) {
@@ -167,43 +114,7 @@ export const BackupService = {
 
   clearAllData: async (): Promise<void> => {
     try {
-      const collectionsToClear = [
-        COLLECTIONS.PRODUCTS,
-        COLLECTIONS.SALES,
-        COLLECTIONS.EXPENSES,
-        COLLECTIONS.EMPLOYEES,
-        COLLECTIONS.CUSTOMERS,
-        COLLECTIONS.SUPPLIERS,
-        COLLECTIONS.ATTENDANCE,
-        COLLECTIONS.CATEGORIES,
-        COLLECTIONS.SEASONS,
-        COLLECTIONS.METADATA,
-      ];
-
-      let batch = writeBatch(db);
-      let operationCount = 0;
-
-      const commitBatchIfNeeded = async () => {
-        if (operationCount >= MAX_BATCH_SIZE) {
-          await batch.commit();
-          batch = writeBatch(db);
-          operationCount = 0;
-        }
-      };
-
-      for (const collectionName of collectionsToClear) {
-        const snapshot = await getDocs(collection(db, collectionName));
-        for (const docSnap of snapshot.docs) {
-          batch.delete(doc(db, collectionName, docSnap.id));
-          operationCount++;
-          await commitBatchIfNeeded();
-        }
-      }
-
-      if (operationCount > 0) {
-        await batch.commit();
-      }
-
+      await post('/api/backup/clear', {});
       console.log("All data cleared successfully");
     } catch (error) {
       console.error("Clear all data failed", error);

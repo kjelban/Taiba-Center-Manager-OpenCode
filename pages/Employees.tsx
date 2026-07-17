@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Employee, EmployeeType, Attendance, Sale } from '../types';
 import { DataService } from '../services/dataService';
+import { AuthService } from '../services/authService';
 import { formatDuration, formatTime } from '../utils/formatUtils';
 import EmployeeModal from '../components/modals/EmployeeModal';
 import { Plus, Trash2, Users, User, Briefcase, Banknote, Clock, Calendar, Shield, Edit2, Lock, FileSpreadsheet, ChevronDown, ChevronUp, Filter } from 'lucide-react';
@@ -24,12 +25,12 @@ const Employees: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   
-  const [formData, setFormData] = useState<Partial<Employee>>({
+  const [formData, setFormData] = useState<Partial<Employee> & { password?: string }>({
     name: '',
     role: '',
     type: EmployeeType.FULL_TIME,
     salary: 0,
-    permissions: ['pos'], // Default permission
+    permissions: ['pos'],
     password: ''
   });
 
@@ -64,7 +65,26 @@ const Employees: React.FC = () => {
 
   const handleDelete = async (id: string) => {
     if (window.confirm('هل أنت متأكد من حذف هذا المستخدم؟')) {
-      await DataService.deleteEmployee(id);
+      try {
+        const idToken = await AuthService.getIdToken();
+        const resp = await fetch('/api/admin/delete-user', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(idToken ? { 'Authorization': `Bearer ${idToken}` } : {}),
+          },
+          body: JSON.stringify({ uid: id }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(data.error || 'فشل حذف المستخدم');
+          return;
+        }
+        const note = data.authDeletionNote || '';
+        alert(data.message + (note ? '\n\n' + note : ''));
+      } catch (err) {
+        console.warn('Failed to delete user:', err);
+      }
     }
   };
 
@@ -77,7 +97,6 @@ const Employees: React.FC = () => {
             type: employee.type,
             salary: employee.salary,
             permissions: employee.permissions,
-            password: '',
             email: employee.email || ''
         });
     } else {
@@ -99,13 +118,6 @@ const Employees: React.FC = () => {
     e.preventDefault();
     
     try {
-        let authId = editingId;
-        
-        if (editingId && formData.password && formData.password.trim().length > 0 && formData.password.length < 6) {
-            alert('كلمة المرور يجب أن تكون 6 أحرف على الأقل.');
-            return;
-        }
-        
         if (!editingId) {
             const password = formData.password;
             if (!password || password.length < 6) {
@@ -116,27 +128,44 @@ const Employees: React.FC = () => {
                 alert('البريد الإلكتروني مطلوب.');
                 return;
             }
-            
-            authId = crypto.randomUUID();
-        }
 
-        const employeeToSave: Employee = {
-          id: authId!,
-          name: formData.name!,
-          email: formData.email!,
-          role: formData.role!,
-          type: formData.type!,
-          salary: Number(formData.salary),
-          permissions: formData.permissions || ['pos']
-        };
-        
-        if (formData.password && formData.password.trim() !== '') {
-            employeeToSave.password = formData.password;
-        } else if (editingId && employees.find(e => e.id === editingId)?.password) {
-            employeeToSave.password = employees.find(e => e.id === editingId)?.password;
+            const idToken = await AuthService.getIdToken();
+            const resp = await fetch('/api/admin/create-user', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(idToken ? { 'Authorization': `Bearer ${idToken}` } : {}),
+                },
+                body: JSON.stringify({ email: formData.email, password }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                alert(data.error || 'فشل إنشاء حساب المستخدم');
+                return;
+            }
+
+            const employeeToSave: Employee = {
+              id: data.uid,
+              name: formData.name!,
+              email: formData.email!,
+              role: formData.role!,
+              type: formData.type!,
+              salary: Number(formData.salary),
+              permissions: formData.permissions || ['pos']
+            };
+            await DataService.saveEmployee(employeeToSave);
+        } else {
+            const employeeToSave: Employee = {
+              id: editingId,
+              name: formData.name!,
+              email: formData.email!,
+              role: formData.role!,
+              type: formData.type!,
+              salary: Number(formData.salary),
+              permissions: formData.permissions || ['pos']
+            };
+            await DataService.saveEmployee(employeeToSave);
         }
-        
-        await DataService.saveEmployee(employeeToSave);
         setIsModalOpen(false);
     } catch (err: any) {
         console.error(err);

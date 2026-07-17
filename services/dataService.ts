@@ -15,6 +15,7 @@ export { EmployeeService, AttendanceService } from './employeeService';
 export { SupplierService } from './supplierService';
 export { CategoryService } from './categoryService';
 export { BackupService } from './backupService';
+export { AuthService } from './authService';
 
 export const DataService = {
   // Product methods
@@ -22,7 +23,6 @@ export const DataService = {
   subscribeToProducts: ProductService.subscribeToProducts,
   saveProduct: ProductService.saveProduct,
   deleteProduct: ProductService.deleteProduct,
-  updateStock: ProductService.updateStock,
 
   // Sale methods
   getSales: SaleService.getSales,
@@ -41,7 +41,6 @@ export const DataService = {
   subscribeToCustomers: CustomerService.subscribeToCustomers,
   saveCustomer: CustomerService.saveCustomer,
   deleteCustomer: CustomerService.deleteCustomer,
-  updateCustomerPurchase: CustomerService.updateCustomerPurchase,
 
   // Expense methods
   getExpenses: ExpenseService.getExpenses,

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { DataService } from '../services/dataService';
-import { Save, Upload, RotateCcw, CheckCircle, AlertTriangle, Plus, Trash2, List } from 'lucide-react';
+import { AuthService } from '../services/authService';
+import { Save, Upload, RotateCcw, CheckCircle, AlertTriangle, Plus, Trash2, List, Lock, Key } from 'lucide-react';
 
 const Settings: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -8,6 +9,14 @@ const Settings: React.FC = () => {
   const [seasons, setSeasons] = useState<string[]>([]);
   const [newCategory, setNewCategory] = useState('');
   const [newSeason, setNewSeason] = useState('');
+  
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordLoading, setPasswordLoading] = useState(false);
+  
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetLoading, setResetLoading] = useState(false);
 
   useEffect(() => {
     loadLists();
@@ -96,6 +105,71 @@ const Settings: React.FC = () => {
     }
   };
 
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordLoading(true);
+    try {
+      if (newPassword !== confirmPassword) {
+        alert('كلمتا المرور غير متطابقتين');
+        setPasswordLoading(false);
+        return;
+      }
+      if (newPassword.length < 6) {
+        alert('يجب أن تكون كلمة المرور الجديدة 6 أحرف على الأقل');
+        setPasswordLoading(false);
+        return;
+      }
+      
+      const user = AuthService.getCurrentUser();
+      if (!user) {
+        alert('يجب تسجيل الدخول أولاً');
+        setPasswordLoading(false);
+        return;
+      }
+
+      await AuthService.updatePassword(newPassword);
+      setStatusMessage('تم تغيير كلمة المرور بنجاح');
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setTimeout(() => setStatusMessage(null), 3000);
+    } catch (err: any) {
+      if (err.code === 'auth/requires-recent-login') {
+        alert('يجب تسجيل الدخول مرة أخرى قبل تغيير كلمة المرور');
+      } else {
+        alert(err.message || 'فشل تغيير كلمة المرور');
+      }
+    }
+    setPasswordLoading(false);
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setResetLoading(true);
+    try {
+      const idToken = await AuthService.getIdToken();
+      const resp = await fetch('/api/admin/reset-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idToken ? { 'Authorization': `Bearer ${idToken}` } : {}),
+        },
+        body: JSON.stringify({ email: resetEmail }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.error || 'فشل إرسال رابط إعادة تعيين كلمة المرور');
+      } else {
+        setStatusMessage('تم إرسال رابط إعادة تعيين كلمة المرور إلى البريد الإلكتروني');
+        setResetEmail('');
+        setTimeout(() => setStatusMessage(null), 3000);
+      }
+    } catch (err: any) {
+      alert(err.message || 'حدث خطأ أثناء الإرسال');
+    }
+    setResetLoading(false);
+  };
+
   return (
     <div className="p-6 max-w-5xl mx-auto h-[calc(100vh-64px)] overflow-y-auto">
       <h2 className="text-2xl font-bold text-slate-800 mb-6">الإعدادات</h2>
@@ -109,6 +183,87 @@ const Settings: React.FC = () => {
 
       <div className="space-y-8">
         
+        {/* List Management Section */}
+        <section className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
+            <h3 className="text-lg font-bold text-slate-700 mb-4 border-b border-slate-100 pb-2 flex items-center gap-2">
+                <Lock size={20} />
+                تغيير كلمة المرور
+            </h3>
+            
+            <form onSubmit={handleChangePassword} className="max-w-md space-y-4">
+                <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">كلمة المرور الحالية</label>
+                    <input 
+                        type="password" 
+                        className="w-full border border-slate-300 rounded-lg p-2 text-sm bg-white text-slate-900 outline-none focus:border-primary"
+                        value={currentPassword}
+                        onChange={(e) => setCurrentPassword(e.target.value)}
+                        placeholder="أدخل كلمة المرور الحالية"
+                    />
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">كلمة المرور الجديدة</label>
+                    <input 
+                        type="password" 
+                        className="w-full border border-slate-300 rounded-lg p-2 text-sm bg-white text-slate-900 outline-none focus:border-primary"
+                        value={newPassword}
+                        onChange={(e) => setNewPassword(e.target.value)}
+                        placeholder="أدخل كلمة المرور الجديدة"
+                    />
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">تأكيد كلمة المرور الجديدة</label>
+                    <input 
+                        type="password" 
+                        className="w-full border border-slate-300 rounded-lg p-2 text-sm bg-white text-slate-900 outline-none focus:border-primary"
+                        value={confirmPassword}
+                        onChange={(e) => setConfirmPassword(e.target.value)}
+                        placeholder="أعد إدخال كلمة المرور الجديدة"
+                    />
+                </div>
+                <button 
+                    type="submit"
+                    disabled={passwordLoading}
+                    className="bg-primary hover:bg-secondary text-white px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-70"
+                >
+                    {passwordLoading ? 'جاري التغيير...' : 'تغيير كلمة المرور'}
+                </button>
+            </form>
+        </section>
+
+        {/* Password Reset Section */}
+        <section className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
+            <h3 className="text-lg font-bold text-slate-700 mb-4 border-b border-slate-100 pb-2 flex items-center gap-2">
+                <Key size={20} />
+                إعادة تعيين كلمة المرور
+            </h3>
+            
+            <form onSubmit={handleResetPassword} className="max-w-md space-y-4">
+                <p className="text-sm text-slate-500">
+                    سيُرسل رابط إعادة تعيين كلمة المرور إلى البريد الإلكتروني للمستخدم.
+                </p>
+                <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">البريد الإلكتروني</label>
+                    <input 
+                        type="email" 
+                        className="w-full border border-slate-300 rounded-lg p-2 text-sm bg-white text-slate-900 outline-none focus:border-primary"
+                        value={resetEmail}
+                        onChange={(e) => setResetEmail(e.target.value)}
+                        placeholder="user@taiba.com"
+                        dir="ltr"
+                        required
+                    />
+                </div>
+                <button 
+                    type="submit"
+                    disabled={resetLoading}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-70"
+                >
+                    {resetLoading ? 'جاري الإرسال...' : 'إرسال رابط إعادة التعيين'}
+                </button>
+            </form>
+        </section>
+
         {/* List Management Section */}
         <section className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
             <h3 className="text-lg font-bold text-slate-700 mb-4 border-b border-slate-100 pb-2 flex items-center gap-2">

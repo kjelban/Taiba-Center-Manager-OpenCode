@@ -109,8 +109,7 @@ export interface Employee {
   role: string;
   type: EmployeeType;
   salary: number;
-  permissions: string[]; // List of page IDs allowed to access
-  password?: string;
+  permissions: string[];
 }
 
 export interface Attendance {

@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import { Employee } from '../../types';
+import { AuthService } from '../../services/authService';
 import { EmployeeService, AttendanceService } from '../../services/employeeService';
 
 interface AuthContextType {
@@ -29,89 +30,62 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [isInitialLoading, setIsInitialLoading] = useState(true);
 
   useEffect(() => {
-    const loadUser = async () => {
-      const userId = localStorage.getItem('taiba_user_id');
-
-      if (userId) {
-        const employee = await EmployeeService.getEmployee(userId);
+    const unsubscribe = AuthService.onAuthStateChanged(async (firebaseUser) => {
+      if (firebaseUser) {
+        const employee = await EmployeeService.getEmployee(firebaseUser.uid);
         if (employee) {
           setCurrentUser(employee);
 
-          const explicitSignOut = localStorage.getItem('explicitlySignedOut');
-          localStorage.removeItem('explicitlySignedOut');
-
-          let shouldCreateNewSession = true;
-
-          if (!explicitSignOut) {
-            const activeSession = await AttendanceService.getActiveSession(employee.id);
-            if (activeSession) {
-              const checkIn = new Date(activeSession.checkInTime).getTime();
-              const now = Date.now();
-              const twelveHours = 12 * 60 * 60 * 1000;
-              if (now - checkIn < twelveHours) {
-                localStorage.setItem('taiba_current_session', JSON.stringify(activeSession));
-                shouldCreateNewSession = false;
-              }
-            }
-          }
-
-          if (shouldCreateNewSession) {
-            try {
+          const activeSession = await AttendanceService.getActiveSession(employee.id);
+          if (activeSession) {
+            const checkIn = new Date(activeSession.checkInTime).getTime();
+            const now = Date.now();
+            const twelveHours = 12 * 60 * 60 * 1000;
+            if (now - checkIn < twelveHours) {
+              localStorage.setItem('taiba_current_session', JSON.stringify(activeSession));
+            } else {
+              await AttendanceService.closeRecord(activeSession);
               const newSession = await AttendanceService.clockIn(employee);
               localStorage.setItem('taiba_current_session', JSON.stringify(newSession));
-            } catch {}
+            }
+          } else {
+            const newSession = await AttendanceService.clockIn(employee);
+            localStorage.setItem('taiba_current_session', JSON.stringify(newSession));
           }
         } else {
-          localStorage.removeItem('taiba_user_id');
+          await AuthService.signOut();
           localStorage.removeItem('taiba_current_session');
         }
+      } else {
+        setCurrentUser(null);
+        localStorage.removeItem('taiba_current_session');
       }
-      await AttendanceService.autoCloseOpenSessions();
       setIsInitialLoading(false);
-    };
-    loadUser();
+    });
+
+    return () => unsubscribe();
   }, []);
 
   const handleLogin = useCallback(async (employee: Employee) => {
-    try {
-        const session = await AttendanceService.clockIn(employee);
-        setCurrentUser(employee);
-        localStorage.setItem('taiba_user_id', employee.id);
-        if (session) {
-            localStorage.setItem('taiba_current_session', JSON.stringify(session));
-        }
-    } catch (error) {
-        console.error("Login failed:", error);
-        alert("فشل تسجيل الدخول. يرجى المحاولة مرة أخرى.");
-    }
+    setCurrentUser(employee);
+    // Session creation is handled by onAuthStateChanged when Firebase Auth state changes.
+    // Do NOT call clockIn here — it would race with onAuthStateChanged and create duplicate records.
   }, []);
 
   const confirmLogout = useCallback(async () => {
     const sessionData = localStorage.getItem('taiba_current_session');
-    let sessionId: string | null = null;
     if (sessionData) {
       try {
         const session = JSON.parse(sessionData);
-        sessionId = session.id;
-      } catch {}
-    }
-    
-    if (sessionId) {
-        try {
-            await AttendanceService.clockOut(sessionId);
-        } catch (e) {
-            console.error("Clock-out error:", e);
+        if (session.id) {
+          await AttendanceService.clockOut(session.id);
         }
+      } catch (e) {
+        console.error("Clock-out error:", e);
+      }
     }
-    
-    try {
-        localStorage.setItem("explicitlySignedOut", "true");
-        localStorage.removeItem('taiba_user_id');
-        localStorage.removeItem('taiba_current_session');
-    } catch (e) {
-        console.error("Signout error:", e);
-    }
-    
+    localStorage.removeItem('taiba_current_session');
+    await AuthService.signOut();
     setCurrentUser(null);
   }, []);
 
