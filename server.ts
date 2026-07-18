@@ -160,7 +160,7 @@ async function startServer() {
     crossOriginEmbedderPolicy: false,
   }));
 
-  // CORS - restrict to known origins (API routes only; static files are same-origin)
+  // CORS - allow same-origin and configured origins (API routes only)
   const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
   const isProduction = process.env.NODE_ENV === 'production';
   app.use((req, res, next) => {
@@ -168,21 +168,32 @@ async function startServer() {
     if (!req.path.startsWith('/api/')) return next();
 
     const origin = req.headers.origin;
-    if (ALLOWED_ORIGINS.length === 0) {
-      if (isProduction) {
-        // In production with no allowed origins configured, reject cross-origin requests
-        // Only same-origin requests (no Origin header) are allowed
-        if (origin) {
-          return res.status(403).json({ error: "CORS: No allowed origins configured" });
+    const host = req.headers.host;
+
+    if (origin && host) {
+      // Allow same-origin: Origin scheme+host matches Host header
+      try {
+        const originUrl = new URL(origin);
+        if (originUrl.host === host) {
+          res.setHeader('Access-Control-Allow-Origin', origin);
+          if (req.method === 'OPTIONS') return res.sendStatus(204);
+          return next();
         }
-      } else {
-        // In development, allow all origins
-        res.setHeader('Access-Control-Allow-Origin', '*');
-      }
-    } else if (origin && ALLOWED_ORIGINS.includes(origin)) {
+      } catch {}
+    }
+
+    if (ALLOWED_ORIGINS.length > 0 && origin && ALLOWED_ORIGINS.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
+    } else if (!origin) {
+      // No Origin header = same-origin or non-CORS request — allow
+    } else if (isProduction && origin) {
+      // Cross-origin in production with no match — reject
+      return res.status(403).json({ error: "CORS: Origin not allowed" });
+    } else if (!isProduction) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
     }
+
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
