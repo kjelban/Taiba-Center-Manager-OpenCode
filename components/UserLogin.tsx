@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Employee } from '../types';
-import { DataService } from '../services/dataService';
 import { setServerSessionToken } from '../services/base';
-import { Baby, LogIn, Mail, Lock } from 'lucide-react';
+import { Baby, LogIn, Lock, User } from 'lucide-react';
 
 interface UserLoginProps {
   onLogin: (employee: Employee) => void;
@@ -13,7 +12,8 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
   const [loading, setLoading] = useState(true);
 
   const [hasEmployees, setHasEmployees] = useState(false);
-  const [email, setEmail] = useState('');
+  const [employees, setEmployees] = useState<{ id: string; name: string; email: string }[]>([]);
+  const [selectedEmail, setSelectedEmail] = useState('');
   const [password, setPassword] = useState('');
 
   useEffect(() => {
@@ -21,6 +21,14 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
       .then(r => r.json())
       .then(data => {
         setHasEmployees(data.hasEmployees);
+        if (data.hasEmployees) {
+          return fetch('/api/auth/employees');
+        }
+        return null;
+      })
+      .then(resp => resp?.json())
+      .then(list => {
+        if (list) setEmployees(list);
         setLoading(false);
       })
       .catch(err => {
@@ -37,8 +45,7 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
 
     try {
       if (!hasEmployees) {
-        // Bootstrap: first-time setup
-        if (!email) {
+        if (!selectedEmail) {
           setError('يرجى إدخال البريد الإلكتروني');
           setLoading(false);
           return;
@@ -52,7 +59,7 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
         const bootstrapResp = await fetch('/api/admin/bootstrap', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password, googleUid: null }),
+          body: JSON.stringify({ email: selectedEmail, password, googleUid: null }),
         });
         const bootstrapData = await bootstrapResp.json();
         if (!bootstrapResp.ok) {
@@ -61,11 +68,10 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
           return;
         }
 
-        // Now login with the newly created account
         const loginResp = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password }),
+          body: JSON.stringify({ email: selectedEmail, password }),
         });
         const loginData = await loginResp.json();
         if (!loginResp.ok) {
@@ -79,9 +85,8 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
         return;
       }
 
-      // Normal login
-      if (!email) {
-        setError('يرجى إدخال البريد الإلكتروني');
+      if (!selectedEmail) {
+        setError('يرجى اختيار اسمك من القائمة');
         setLoading(false);
         return;
       }
@@ -94,11 +99,11 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
       const loginResp = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email: selectedEmail, password }),
       });
       const loginData = await loginResp.json();
       if (!loginResp.ok) {
-        setError(loginData.error || 'البريد الإلكتروني أو كلمة المرور غير صحيحة');
+        setError(loginData.error || 'كلمة المرور غير صحيحة');
         setLoading(false);
         return;
       }
@@ -134,19 +139,38 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
 
             <form onSubmit={handleLogin} className="space-y-4">
                 <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">البريد الإلكتروني</label>
-                    <div className="relative">
-                        <input
-                            type="email"
-                            required
-                            value={email}
-                            onChange={e => setEmail(e.target.value)}
-                            className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
-                            dir="ltr"
-                            placeholder="user@taiba.com"
-                        />
-                        <Mail size={18} className="absolute left-4 top-3.5 text-slate-400" />
-                    </div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">اختر المستخدم</label>
+                    {hasEmployees ? (
+                        <div className="relative">
+                            <select
+                                value={selectedEmail}
+                                onChange={e => setSelectedEmail(e.target.value)}
+                                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all appearance-none"
+                                dir="rtl"
+                            >
+                                <option value="">-- اختر اسمك --</option>
+                                {employees.map(emp => (
+                                    <option key={emp.id} value={emp.email}>
+                                        {emp.name || emp.email}
+                                    </option>
+                                ))}
+                            </select>
+                            <User size={18} className="absolute left-4 top-3.5 text-slate-400" />
+                        </div>
+                    ) : (
+                        <div className="relative">
+                            <input
+                                type="email"
+                                required
+                                value={selectedEmail}
+                                onChange={e => setSelectedEmail(e.target.value)}
+                                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
+                                dir="ltr"
+                                placeholder="admin@taiba.com"
+                            />
+                            <User size={18} className="absolute left-4 top-3.5 text-slate-400" />
+                        </div>
+                    )}
                 </div>
 
                 <div>

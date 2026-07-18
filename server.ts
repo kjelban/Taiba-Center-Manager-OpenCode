@@ -359,6 +359,31 @@ async function startServer() {
     }
   });
 
+  // Public: list employee names/emails for login dropdown (no sensitive data)
+  app.get("/api/auth/employees", async (_req, res) => {
+    try {
+      const token = await getGoogleAccessToken();
+      const resp = await fetch(
+        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!resp.ok) return res.json([]);
+      const data = await resp.json() as any;
+      if (!data.documents) return res.json([]);
+      const employees = data.documents.map((doc: any) => {
+        const f = doc.fields || {};
+        return {
+          id: doc.name.split('/').pop(),
+          name: f.name?.stringValue || '',
+          email: f.email?.stringValue || '',
+        };
+      }).filter((e: any) => e.name || e.email);
+      res.json(employees);
+    } catch {
+      res.json([]);
+    }
+  });
+
   // Bootstrap: create first admin user (only works when no employees exist)
   // Password is NEVER sent to or compared on the client — all validation is server-side.
   // If googleUid is provided, the user already authenticated via Google sign-in.
