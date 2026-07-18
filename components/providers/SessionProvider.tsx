@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
+import React, { useState, useEffect, createContext, useContext } from 'react';
 import { Attendance } from '../../types';
 import { getServerSessionToken } from '../../services/base';
 
@@ -24,7 +24,6 @@ interface SessionProviderProps {
 
 export const SessionProvider: React.FC<SessionProviderProps> = ({ children }) => {
   const [currentSession, setCurrentSession] = useState<Attendance | null>(() => {
-    // Initialize from localStorage (set by AuthProvider during mount)
     const stored = localStorage.getItem('taiba_current_session');
     if (stored) {
       try {
@@ -38,10 +37,12 @@ export const SessionProvider: React.FC<SessionProviderProps> = ({ children }) =>
   useEffect(() => {
     if (currentSession) {
       localStorage.setItem('taiba_current_session', JSON.stringify(currentSession));
+    } else {
+      localStorage.removeItem('taiba_current_session');
     }
   }, [currentSession]);
 
-  // Auto clock-out on page close/refresh
+  // Clock out on page close/refresh
   useEffect(() => {
     if (!currentSession?.id) return;
     const handleBeforeUnload = () => {
@@ -56,6 +57,30 @@ export const SessionProvider: React.FC<SessionProviderProps> = ({ children }) =>
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [currentSession?.id]);
+
+  // Sync session from localStorage when tab becomes visible again
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        const stored = localStorage.getItem('taiba_current_session');
+        if (stored) {
+          try {
+            const parsed = JSON.parse(stored);
+            if (parsed?.id && parsed?.id !== currentSession?.id) {
+              setCurrentSession(parsed);
+            } else if (parsed?.id && parsed.checkOutTime && currentSession?.id === parsed.id) {
+              // Session was closed externally — clear it
+              setCurrentSession(null);
+            }
+          } catch {}
+        } else if (currentSession) {
+          setCurrentSession(null);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [currentSession?.id]);
 
   return (

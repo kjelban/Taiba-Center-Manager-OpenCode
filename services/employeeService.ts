@@ -55,14 +55,10 @@ export const AttendanceService = {
     try {
       const q = query(collection(db, COLLECTIONS.ATTENDANCE), where('checkOutTime', '==', null));
       const snapshot = await getDocs(q);
-      const now = Date.now();
       for (const docSnap of snapshot.docs) {
         const record = docSnap.data() as Attendance;
         if (employeeId && record.employeeId !== employeeId) continue;
-        const checkIn = new Date(record.checkInTime).getTime();
-        if ((now - checkIn) > 12 * 60 * 60 * 1000) {
-          await AttendanceService.closeRecord(record);
-        }
+        await AttendanceService.closeRecord(record);
       }
     } catch { }
   },
@@ -90,7 +86,10 @@ export const AttendanceService = {
   },
 
   clockIn: async (employee: Employee): Promise<Attendance> => {
-    await AttendanceService.autoCloseOpenSessions(employee.id);
+    const existing = await AttendanceService.getActiveSession(employee.id);
+    if (existing) {
+      return existing;
+    }
     const now = new Date();
     const newRecord: Attendance = {
       id: crypto.randomUUID(),

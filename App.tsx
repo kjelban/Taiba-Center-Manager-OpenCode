@@ -39,7 +39,7 @@ const AuthenticatedApp: React.FC = () => {
   // Invoice Editing State
   const [invoiceToEdit, setInvoiceToEdit] = useState<Sale | null>(null);
 
-  // Sync session from localStorage when user loads
+  // Sync session from localStorage when user is restored
   useEffect(() => {
     if (currentUser && !currentSession) {
       const sessionData = localStorage.getItem('taiba_current_session');

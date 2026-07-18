@@ -4,8 +4,12 @@ import { Employee } from '../../types';
 import { EmployeeService, AttendanceService } from '../../services/employeeService';
 import { setServerSessionToken } from '../../services/base';
 
+const STORAGE_KEY_USER = 'taiba_current_user';
+const STORAGE_KEY_SESSION = 'taiba_current_session';
+
 interface AuthContextType {
   currentUser: Employee | null;
+  isInitialLoading: boolean;
   handleLogin: (employee: Employee) => Promise<void>;
   confirmLogout: () => Promise<void>;
   setCurrentUser: (user: Employee | null) => void;
@@ -27,36 +31,54 @@ interface AuthProviderProps {
 
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<Employee | null>(null);
-  const [isInitialLoading, setIsInitialLoading] = useState(false);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
+
+  // Restore user from localStorage on mount
+  useEffect(() => {
+    const restoreUser = async () => {
+      try {
+        const storedUser = localStorage.getItem(STORAGE_KEY_USER);
+        if (!storedUser) {
+          setIsInitialLoading(false);
+          return;
+        }
+        const employee: Employee = JSON.parse(storedUser);
+
+        // Validate employee still exists in Firestore
+        const fresh = await EmployeeService.getEmployee(employee.id);
+        if (!fresh) {
+          localStorage.removeItem(STORAGE_KEY_USER);
+          localStorage.removeItem(STORAGE_KEY_SESSION);
+          setIsInitialLoading(false);
+          return;
+        }
+
+        setCurrentUser(fresh);
+        localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(fresh));
+      } catch {
+        localStorage.removeItem(STORAGE_KEY_USER);
+        localStorage.removeItem(STORAGE_KEY_SESSION);
+      } finally {
+        setIsInitialLoading(false);
+      }
+    };
+    restoreUser();
+  }, []);
 
   const handleLogin = useCallback(async (employee: Employee) => {
     setCurrentUser(employee);
+    localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(employee));
 
-    // Set up attendance
     try {
-      const activeSession = await AttendanceService.getActiveSession(employee.id);
-      if (activeSession) {
-        const checkIn = new Date(activeSession.checkInTime).getTime();
-        const now = Date.now();
-        const twelveHours = 12 * 60 * 60 * 1000;
-        if (now - checkIn < twelveHours) {
-          localStorage.setItem('taiba_current_session', JSON.stringify(activeSession));
-        } else {
-          await AttendanceService.closeRecord(activeSession);
-          const newSession = await AttendanceService.clockIn(employee);
-          localStorage.setItem('taiba_current_session', JSON.stringify(newSession));
-        }
-      } else {
-        const newSession = await AttendanceService.clockIn(employee);
-        localStorage.setItem('taiba_current_session', JSON.stringify(newSession));
-      }
+      const session = await AttendanceService.clockIn(employee);
+      localStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(session));
     } catch (e) {
-      console.error("Attendance setup error:", e);
+      console.error("Attendance clock-in error:", e);
     }
   }, []);
 
   const confirmLogout = useCallback(async () => {
-    const sessionData = localStorage.getItem('taiba_current_session');
+    const sessionData = localStorage.getItem(STORAGE_KEY_SESSION);
     if (sessionData) {
       try {
         const session = JSON.parse(sessionData);
@@ -67,13 +89,14 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         console.error("Clock-out error:", e);
       }
     }
-    localStorage.removeItem('taiba_current_session');
+    localStorage.removeItem(STORAGE_KEY_SESSION);
+    localStorage.removeItem(STORAGE_KEY_USER);
     setServerSessionToken(null);
     setCurrentUser(null);
   }, []);
 
   return (
-    <AuthContext.Provider value={{ currentUser, handleLogin, confirmLogout, setCurrentUser }}>
+    <AuthContext.Provider value={{ currentUser, isInitialLoading, handleLogin, confirmLogout, setCurrentUser }}>
       {isInitialLoading ? (
         <div className="fixed inset-0 bg-slate-900 flex items-center justify-center">
           <div className="text-center">
