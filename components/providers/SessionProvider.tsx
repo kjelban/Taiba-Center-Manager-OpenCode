@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, createContext, useContext } from 'react';
+import React, { useState, useEffect, useRef, createContext, useContext } from 'react';
 import { Attendance } from '../../types';
 import { getServerSessionToken } from '../../services/base';
 
@@ -22,6 +22,8 @@ interface SessionProviderProps {
   children: React.ReactNode;
 }
 
+const CLOCKOUT_DELAY_MS = 30_000; // 30 seconds — if page hidden longer, clockout (browser closed)
+
 export const SessionProvider: React.FC<SessionProviderProps> = ({ children }) => {
   const [currentSession, setCurrentSession] = useState<Attendance | null>(() => {
     const stored = localStorage.getItem('taiba_current_session');
@@ -33,6 +35,10 @@ export const SessionProvider: React.FC<SessionProviderProps> = ({ children }) =>
     return null;
   });
 
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionRef = useRef(currentSession);
+  sessionRef.current = currentSession;
+
   // Sync session changes to localStorage
   useEffect(() => {
     if (currentSession) {
@@ -42,46 +48,50 @@ export const SessionProvider: React.FC<SessionProviderProps> = ({ children }) =>
     }
   }, [currentSession]);
 
-  // Clock out on page close/refresh
-  useEffect(() => {
-    if (!currentSession?.id) return;
-    const handleBeforeUnload = () => {
-      const token = getServerSessionToken();
-      if (!token) return;
-      fetch('/api/clockout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ id: currentSession.id }),
-        keepalive: true,
-      }).catch(() => {});
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [currentSession?.id]);
-
-  // Sync session from localStorage when tab becomes visible again
+  // Auto clockout when page is hidden for too long (browser close detection)
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
+      if (document.visibilityState === 'hidden') {
+        // Page just became hidden — start a timer to clockout
+        if (sessionRef.current?.id) {
+          const token = getServerSessionToken();
+          if (!token) return;
+          timerRef.current = setTimeout(() => {
+            fetch('/api/clockout', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+              body: JSON.stringify({ id: sessionRef.current?.id }),
+              keepalive: true,
+            }).catch(() => {});
+            // Clear session from localStorage so next load starts fresh
+            localStorage.removeItem('taiba_current_session');
+          }, CLOCKOUT_DELAY_MS);
+        }
+      } else if (document.visibilityState === 'visible') {
+        // Page became visible again — cancel the timer (it was a refresh or tab switch)
+        if (timerRef.current) {
+          clearTimeout(timerRef.current);
+          timerRef.current = null;
+        }
+        // Sync session from localStorage in case it was updated by another tab
         const stored = localStorage.getItem('taiba_current_session');
         if (stored) {
           try {
             const parsed = JSON.parse(stored);
-            if (parsed?.id && parsed?.id !== currentSession?.id) {
+            if (parsed?.id && parsed?.id !== sessionRef.current?.id) {
               setCurrentSession(parsed);
-            } else if (parsed?.id && parsed.checkOutTime && currentSession?.id === parsed.id) {
-              // Session was closed externally — clear it
-              setCurrentSession(null);
             }
           } catch {}
-        } else if (currentSession) {
-          setCurrentSession(null);
         }
       }
     };
+
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [currentSession?.id]);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
 
   return (
     <SessionContext.Provider value={{ currentSession, setCurrentSession }}>
