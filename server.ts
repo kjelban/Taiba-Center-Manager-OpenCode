@@ -304,6 +304,25 @@ async function startServer() {
 
   app.get("/api/health", (req, res) => res.json({ status: "ok" }));
 
+  // Public check: does any employee exist? (used by login screen to decide bootstrap vs login)
+  app.get("/api/admin/has-employees", async (_req, res) => {
+    try {
+      const token = await getGoogleAccessToken();
+      const resp = await fetch(
+        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (resp.ok) {
+        const data = await resp.json() as any;
+        return res.json({ hasEmployees: !!(data.documents && data.documents.length > 0) });
+      }
+      // If Firestore returns non-200 (e.g. empty collection = 404 or 200 with no docs), treat as no employees
+      res.json({ hasEmployees: false });
+    } catch {
+      res.json({ hasEmployees: false });
+    }
+  });
+
   // Bootstrap: create first admin user (only works when no employees exist)
   // Password is NEVER sent to or compared on the client — all validation is server-side.
   app.post("/api/admin/bootstrap", adminLimiter, async (req, res) => {

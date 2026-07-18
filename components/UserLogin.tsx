@@ -17,14 +17,17 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
   const [password, setPassword] = useState('');
 
   useEffect(() => {
-    DataService.getEmployees().then(data => {
-        setHasEmployees(data.length > 0);
+    fetch('/api/admin/has-employees')
+      .then(r => r.json())
+      .then(data => {
+        setHasEmployees(data.hasEmployees);
         setLoading(false);
-    }).catch(err => {
+      })
+      .catch(err => {
         console.error(err);
         setError('تعذر الاتصال بقاعدة البيانات. الرجاء المحاولة مرة أخرى.');
         setLoading(false);
-    });
+      });
   }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
