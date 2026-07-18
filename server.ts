@@ -494,19 +494,21 @@ async function startServer() {
         return res.status(401).json({ error: "البريد الإلكتروني غير مسجل في النظام" });
       }
 
-      // Validate password against stored hash or bootstrap password
+      // Validate password against stored hash, legacy plain-text password, or bootstrap password
       const storedHash = employee.passwordHash;
+      const legacyPassword = employee.password;
       const bootstrapPassword = process.env.BOOTSTRAP_PASSWORD;
 
       if (storedHash) {
-        // Verify against stored hash (bcrypt-like comparison using crypto)
         const { createHash } = await import('crypto');
         const inputHash = createHash('sha256').update(password).digest('hex');
         if (inputHash !== storedHash) {
           return res.status(401).json({ error: "كلمة المرور غير صحيحة" });
         }
+      } else if (legacyPassword && password === legacyPassword) {
+        // Legacy plain-text password match
       } else if (bootstrapPassword && password === bootstrapPassword) {
-        // Accept bootstrap password for accounts without a stored hash
+        // Accept bootstrap password for accounts without any stored password
       } else {
         return res.status(401).json({ error: "كلمة المرور غير صحيحة" });
       }
