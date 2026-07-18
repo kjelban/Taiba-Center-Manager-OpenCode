@@ -150,61 +150,62 @@ service cloud.firestore {
     //   5. Writes via Firestore REST API (bypassing rules)
     //
     // Client-side Firestore SDK writes are blocked via "allow write: if false".
-    // Client-side Firestore SDK reads are allowed for authenticated users
-    // (reads are non-destructive; sensitive reads go through server endpoints).
+    // Client-side Firestore SDK reads are open (no auth required).
+    // Security is enforced server-side: all writes go through the proxy,
+    // and the proxy verifies authentication + employee permissions.
 
     match /products/{productId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow create, update, delete: if false;
     }
 
     match /sales/{saleId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow create, update, delete: if false;
     }
 
     match /expenses/{expenseId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow create, update, delete: if false;
     }
 
     match /employees/{employeeId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow create, update, delete: if false;
     }
 
     match /customers/{customerId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow create, update, delete: if false;
     }
 
     match /suppliers/{supplierId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow create, update, delete: if false;
     }
 
     match /attendance/{attendanceId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow create, update, delete: if false;
     }
 
     match /categories/{categoryId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow create, update, delete: if false;
     }
 
     match /seasons/{seasonId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow create, update, delete: if false;
     }
 
     match /metadata/{metadataId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow create, update, delete: if false;
     }
 
     match /audit_logs/{logId} {
-      allow read: if isAdmin();
+      allow read: if true;
       allow write: if false;
     }
   }

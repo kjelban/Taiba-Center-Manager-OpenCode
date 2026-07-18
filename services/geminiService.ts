@@ -1,12 +1,12 @@
 import { Product, Sale } from "../types";
-import { auth } from "./firebase";
+import { getServerSessionToken } from "./base";
 
 export const GeminiService = {
   // Suggest a selling price based on cost and market trends via backend server
   suggestPrice: async (productName: string, costPrice: number, season: string): Promise<string> => {
     try {
-      const token = await auth.currentUser?.getIdToken();
-      if (!token) return "عذراً، يجب تسجيل الدخول لاستخدام هذه الميزة.";
+      const token = getServerSessionToken();
+      if (!token) return "عذراً، يجب تسجيل الدخول لاستخدام هذه الميزة.";;
 
       const response = await fetch("/api/gemini/suggest-price", {
         method: "POST",
@@ -33,7 +33,7 @@ export const GeminiService = {
   // Analyze Sales Data via backend server
   analyzeBusiness: async (sales: Sale[], products: Product[]): Promise<string> => {
     try {
-      const token = await auth.currentUser?.getIdToken();
+      const token = getServerSessionToken();
       if (!token) return "عذراً، يجب تسجيل الدخول لاستخدام هذه الميزة.";
 
       const response = await fetch("/api/gemini/analyze-business", {

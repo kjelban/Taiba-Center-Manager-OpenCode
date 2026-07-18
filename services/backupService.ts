@@ -6,12 +6,12 @@ import { CustomerService } from './customerService';
 import { SupplierService } from './supplierService';
 import { AttendanceService } from './employeeService';
 import { CategoryService } from './categoryService';
+import { getServerSessionToken } from './base';
 
 async function getIdToken(): Promise<string> {
-  const { auth } = await import('./firebase');
-  const user = auth.currentUser;
-  if (!user) throw new Error('Not authenticated');
-  return user.getIdToken();
+  const token = getServerSessionToken();
+  if (!token) throw new Error('Not authenticated');
+  return token;
 }
 
 async function post(endpoint: string, body: any): Promise<any> {

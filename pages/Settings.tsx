@@ -127,7 +127,19 @@ const Settings: React.FC = () => {
         return;
       }
 
-      await AuthService.updatePassword(newPassword);
+      const idToken = await AuthService.getIdToken();
+      const resp = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idToken ? { 'Authorization': `Bearer ${idToken}` } : {}),
+        },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.error || 'Failed to change password');
+      }
       setStatusMessage('تم تغيير كلمة المرور بنجاح');
       setCurrentPassword('');
       setNewPassword('');

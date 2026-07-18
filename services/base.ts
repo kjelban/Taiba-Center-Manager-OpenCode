@@ -1,10 +1,20 @@
-import { db, auth } from './firebase';
+import { db } from './firebase';
 import { collection, getDocs, onSnapshot } from 'firebase/firestore';
 
+// Server session token (set after login via /api/auth/login)
+let serverSessionToken: string | null = null;
+
+export function setServerSessionToken(token: string | null) {
+  serverSessionToken = token;
+}
+
+export function getServerSessionToken(): string | null {
+  return serverSessionToken;
+}
+
 async function getIdToken(): Promise<string> {
-  const user = auth.currentUser;
-  if (!user) throw new Error('Not authenticated');
-  return user.getIdToken();
+  if (serverSessionToken) return serverSessionToken;
+  throw new Error('Not authenticated');
 }
 
 async function doFetch(url: string, body: any): Promise<boolean> {

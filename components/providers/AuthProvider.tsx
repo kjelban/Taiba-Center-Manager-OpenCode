@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import { Employee } from '../../types';
-import { AuthService } from '../../services/authService';
 import { EmployeeService, AttendanceService } from '../../services/employeeService';
+import { setServerSessionToken } from '../../services/base';
 
 interface AuthContextType {
   currentUser: Employee | null;
@@ -27,49 +27,32 @@ interface AuthProviderProps {
 
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<Employee | null>(null);
-  const [isInitialLoading, setIsInitialLoading] = useState(true);
-
-  useEffect(() => {
-    const unsubscribe = AuthService.onAuthStateChanged(async (firebaseUser) => {
-      if (firebaseUser) {
-        const employee = await EmployeeService.getEmployee(firebaseUser.uid);
-        if (employee) {
-          setCurrentUser(employee);
-
-          const activeSession = await AttendanceService.getActiveSession(employee.id);
-          if (activeSession) {
-            const checkIn = new Date(activeSession.checkInTime).getTime();
-            const now = Date.now();
-            const twelveHours = 12 * 60 * 60 * 1000;
-            if (now - checkIn < twelveHours) {
-              localStorage.setItem('taiba_current_session', JSON.stringify(activeSession));
-            } else {
-              await AttendanceService.closeRecord(activeSession);
-              const newSession = await AttendanceService.clockIn(employee);
-              localStorage.setItem('taiba_current_session', JSON.stringify(newSession));
-            }
-          } else {
-            const newSession = await AttendanceService.clockIn(employee);
-            localStorage.setItem('taiba_current_session', JSON.stringify(newSession));
-          }
-        } else {
-          await AuthService.signOut();
-          localStorage.removeItem('taiba_current_session');
-        }
-      } else {
-        setCurrentUser(null);
-        localStorage.removeItem('taiba_current_session');
-      }
-      setIsInitialLoading(false);
-    });
-
-    return () => unsubscribe();
-  }, []);
+  const [isInitialLoading, setIsInitialLoading] = useState(false);
 
   const handleLogin = useCallback(async (employee: Employee) => {
     setCurrentUser(employee);
-    // Session creation is handled by onAuthStateChanged when Firebase Auth state changes.
-    // Do NOT call clockIn here — it would race with onAuthStateChanged and create duplicate records.
+
+    // Set up attendance
+    try {
+      const activeSession = await AttendanceService.getActiveSession(employee.id);
+      if (activeSession) {
+        const checkIn = new Date(activeSession.checkInTime).getTime();
+        const now = Date.now();
+        const twelveHours = 12 * 60 * 60 * 1000;
+        if (now - checkIn < twelveHours) {
+          localStorage.setItem('taiba_current_session', JSON.stringify(activeSession));
+        } else {
+          await AttendanceService.closeRecord(activeSession);
+          const newSession = await AttendanceService.clockIn(employee);
+          localStorage.setItem('taiba_current_session', JSON.stringify(newSession));
+        }
+      } else {
+        const newSession = await AttendanceService.clockIn(employee);
+        localStorage.setItem('taiba_current_session', JSON.stringify(newSession));
+      }
+    } catch (e) {
+      console.error("Attendance setup error:", e);
+    }
   }, []);
 
   const confirmLogout = useCallback(async () => {
@@ -85,7 +68,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       }
     }
     localStorage.removeItem('taiba_current_session');
-    await AuthService.signOut();
+    setServerSessionToken(null);
     setCurrentUser(null);
   }, []);
 

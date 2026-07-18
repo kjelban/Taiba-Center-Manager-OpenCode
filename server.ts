@@ -236,13 +236,38 @@ async function startServer() {
 
   // ---- Auth Middleware ----
 
-  // Verify Firebase ID token, extract UID, and look up employee record
+  // Server-side session store (for when Firebase Auth providers are unavailable)
+  const sessions = new Map<string, { uid: string; email: string; expiresAt: number }>();
+
+  function createSessionToken(uid: string, email: string): string {
+    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    sessions.set(token, { uid, email, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 });
+    return token;
+  }
+
+  // Verify Firebase ID token OR server session token, extract UID, and look up employee record
   const requireFirebaseAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
       const authHeader = req.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
           return res.status(401).json({ error: "Unauthorized" });
       }
       const token = authHeader.split(' ')[1];
+
+      // Try server session token first
+      const session = sessions.get(token);
+      if (session && session.expiresAt > Date.now()) {
+          const employee = await firestoreGetDocument(`employees/${session.uid}`);
+          if (!employee) {
+              return res.status(403).json({ error: "Employee record not found" });
+          }
+          req.uid = session.uid;
+          req.employee = employee;
+          return next();
+      }
+      // Clean expired session
+      if (session) sessions.delete(token);
+
+      // Fall back to Firebase Auth token
       if (!firebaseConfig?.apiKey) {
           return res.status(500).json({ error: "Server authentication misconfigured." });
       }
@@ -401,6 +426,128 @@ async function startServer() {
       auditLog('admin_bootstrap', newUid, email, {});
 
       res.json({ uid: newUid, employee: adminEmployee });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Server-side login: validates password, returns session token + employee data
+  // No Firebase Auth provider required — works even when Email/Password is disabled.
+  app.post("/api/auth/login", adminLimiter, async (req, res) => {
+    try {
+      const { email, password } = req.body;
+      if (!email || typeof email !== 'string') {
+        return res.status(400).json({ error: "Email is required" });
+      }
+      if (!password || typeof password !== 'string') {
+        return res.status(400).json({ error: "Password is required" });
+      }
+
+      // Check if any employees exist
+      const token = await getGoogleAccessToken();
+      const listResp = await fetch(
+        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      let employees: any[] = [];
+      if (listResp.ok) {
+        const listData = await listResp.json() as any;
+        if (listData.documents) {
+          employees = listData.documents.map((doc: any) => ({
+            id: doc.name.split('/').pop(),
+            ...Object.fromEntries(
+              Object.entries(doc.fields || {}).map(([k, v]: [string, any]) => [
+                k,
+                v.stringValue || v.integerValue || v.doubleValue || v.booleanValue || v.arrayValue?.values?.map((v: any) => v.stringValue || v.integerValue) || v.nullValue || '',
+              ])
+            ),
+          }));
+        }
+      }
+
+      if (employees.length === 0) {
+        // No employees — this is a bootstrap login
+        const bootstrapPassword = process.env.BOOTSTRAP_PASSWORD;
+        if (!bootstrapPassword || password !== bootstrapPassword) {
+          return res.status(403).json({ error: "Invalid credentials. Use the bootstrap password for initial setup." });
+        }
+
+        // Find or expect employee to be created via /api/admin/bootstrap first
+        return res.status(400).json({ error: "No employees exist. Please use the bootstrap form first." });
+      }
+
+      // Find employee by email
+      const employee = employees.find((e: any) => e.email === email);
+      if (!employee) {
+        return res.status(401).json({ error: "البريد الإلكتروني غير مسجل في النظام" });
+      }
+
+      // Validate password against stored hash or bootstrap password
+      const storedHash = employee.passwordHash;
+      const bootstrapPassword = process.env.BOOTSTRAP_PASSWORD;
+
+      if (storedHash) {
+        // Verify against stored hash (bcrypt-like comparison using crypto)
+        const { createHash } = await import('crypto');
+        const inputHash = createHash('sha256').update(password).digest('hex');
+        if (inputHash !== storedHash) {
+          return res.status(401).json({ error: "كلمة المرور غير صحيحة" });
+        }
+      } else if (bootstrapPassword && password === bootstrapPassword) {
+        // Accept bootstrap password for accounts without a stored hash
+      } else {
+        return res.status(401).json({ error: "كلمة المرور غير صحيحة" });
+      }
+
+      // Create session token
+      const sessionToken = createSessionToken(employee.id, employee.email);
+
+      auditLog('auth_login', employee.id, employee.email, {});
+
+      res.json({ sessionToken, employee });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Server-side password change
+  app.post("/api/auth/change-password", requireFirebaseAuth, async (req, res) => {
+    try {
+      const { currentPassword, newPassword } = req.body;
+      if (!currentPassword || !newPassword) {
+        return res.status(400).json({ error: "Current and new passwords are required" });
+      }
+      if (newPassword.length < 6) {
+        return res.status(400).json({ error: "New password must be at least 6 characters" });
+      }
+
+      const employee = req.employee;
+      const { createHash } = await import('crypto');
+
+      // Verify current password
+      const storedHash = employee.passwordHash;
+      if (storedHash) {
+        const inputHash = createHash('sha256').update(currentPassword).digest('hex');
+        if (inputHash !== storedHash) {
+          return res.status(401).json({ error: "Current password is incorrect" });
+        }
+      } else {
+        // No stored hash — accept bootstrap password
+        const bootstrapPassword = process.env.BOOTSTRAP_PASSWORD;
+        if (!bootstrapPassword || currentPassword !== bootstrapPassword) {
+          return res.status(401).json({ error: "Current password is incorrect" });
+        }
+      }
+
+      // Store new password hash
+      const newHash = createHash('sha256').update(newPassword).digest('hex');
+      const updatedEmployee = { ...employee, passwordHash: newHash };
+      await firestoreSetDocument("employees", employee.id, updatedEmployee);
+
+      auditLog('auth_password_changed', employee.id, employee.email, {});
+
+      res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

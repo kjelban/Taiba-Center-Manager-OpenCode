@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import { Attendance } from '../../types';
-import { auth } from '../../services/firebase';
+import { getServerSessionToken } from '../../services/base';
 
 interface SessionContextType {
   currentSession: Attendance | null;
@@ -45,15 +45,13 @@ export const SessionProvider: React.FC<SessionProviderProps> = ({ children }) =>
   useEffect(() => {
     if (!currentSession?.id) return;
     const handleBeforeUnload = () => {
-      const user = auth.currentUser;
-      if (!user) return;
-      user.getIdToken().then(token => {
-        fetch('/api/clockout', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-          body: JSON.stringify({ id: currentSession.id }),
-          keepalive: true,
-        }).catch(() => {});
+      const token = getServerSessionToken();
+      if (!token) return;
+      fetch('/api/clockout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ id: currentSession.id }),
+        keepalive: true,
       }).catch(() => {});
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
