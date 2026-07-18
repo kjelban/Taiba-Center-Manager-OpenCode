@@ -1,7 +1,7 @@
 import { Employee, Attendance } from '../types';
 import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection, getServerSessionToken } from './base';
 import { db } from './firebase';
-import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 
 export const EmployeeService = {
   getEmployees: async (): Promise<Employee[]> => {

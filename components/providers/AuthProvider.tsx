@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import { Employee } from '../../types';
-import { EmployeeService, AttendanceService } from '../../services/employeeService';
+import { AttendanceService, EmployeeService } from '../../services/employeeService';
 import { setServerSessionToken } from '../../services/base';
 
 const STORAGE_KEY_USER = 'taiba_current_user';
@@ -70,10 +70,23 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(employee));
 
     try {
+      // Close any existing session first (handles orphaned sessions)
+      const existingSession = localStorage.getItem(STORAGE_KEY_SESSION);
+      if (existingSession) {
+        try {
+          const parsed = JSON.parse(existingSession);
+          if (parsed?.id) {
+            await AttendanceService.clockOut(parsed.id).catch(() => {});
+          }
+        } catch {}
+        localStorage.removeItem(STORAGE_KEY_SESSION);
+      }
+
+      // Clock in new session
       const session = await AttendanceService.clockIn(employee);
       localStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(session));
     } catch (e) {
-      console.error("Attendance clock-in error:", e);
+      console.error("Attendance error:", e);
     }
   }, []);
 

@@ -122,28 +122,6 @@ async function firestoreDeleteDocument(collection: string, id: string) {
   if (!resp.ok && resp.status !== 404) throw new Error(`Firestore DELETE failed: ${resp.status} ${await resp.text()}`);
 }
 
-async function firestoreListCollection(collection: string): Promise<any[]> {
-  const token = await getGoogleAccessToken();
-  const resp = await fetch(
-    `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${collection}`,
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
-  if (!resp.ok) throw new Error(`Firestore LIST failed: ${resp.status} ${await resp.text()}`);
-  const data = await resp.json() as any;
-  const docs: any[] = [];
-  if (data.documents) {
-    for (const doc of data.documents) {
-      const record: Record<string, any> = { id: doc.name.split('/').pop() };
-      if (doc.fields) {
-        for (const [k, v] of Object.entries(doc.fields)) {
-          record[k] = firestoreValueToJs(v as any);
-        }
-      }
-      docs.push(record);
-    }
-  }
-  return docs;
-}
 // ---- end Firestore proxy ----
 
 async function auditLog(eventType: string, userId: string, userEmail: string, details: Record<string, any> = {}) {
@@ -939,29 +917,14 @@ async function startServer() {
       const { employeeId, employeeName } = req.body;
       if (!employeeId || !employeeName) return res.status(400).json({ error: "Missing employeeId or employeeName" });
 
-      // Close ALL existing open sessions for this employee
-      const allSessions = await firestoreListCollection('attendance');
-      const now = Date.now();
-      for (const session of allSessions) {
-        if (session.employeeId !== employeeId) continue;
-        if (session.checkOutTime !== null && session.checkOutTime !== undefined) continue;
-        const checkIn = new Date(session.checkInTime).getTime();
-        const diffMs = now - checkIn;
-        const diffMins = Math.round(diffMs / 60000);
-        session.checkOutTime = new Date(now).toISOString();
-        session.durationMinutes = diffMins;
-        await firestoreSetDocument('attendance', session.id, session);
-      }
-
-      // Create new session
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      const newDate = new Date().toISOString().split('T')[0];
+      const now = new Date();
       const newSession = {
         id,
         employeeId,
         employeeName,
-        date: newDate,
-        checkInTime: new Date().toISOString(),
+        date: now.toISOString().split('T')[0],
+        checkInTime: now.toISOString(),
         checkOutTime: null,
         durationMinutes: null,
       };
