@@ -325,18 +325,15 @@ async function startServer() {
 
   // Bootstrap: create first admin user (only works when no employees exist)
   // Password is NEVER sent to or compared on the client — all validation is server-side.
+  // If googleUid is provided, the user already authenticated via Google sign-in.
   app.post("/api/admin/bootstrap", adminLimiter, async (req, res) => {
     try {
-      if (!firebaseConfig?.apiKey) {
-        return res.status(500).json({ error: "Firebase config not available" });
-      }
-
       const bootstrapPassword = process.env.BOOTSTRAP_PASSWORD;
       if (!bootstrapPassword) {
         return res.status(503).json({ error: "Bootstrap not available: BOOTSTRAP_PASSWORD env var not set" });
       }
 
-      const { email, password } = req.body;
+      const { email, password, googleUid } = req.body;
       if (!email || typeof email !== 'string' || !email.includes('@')) {
         return res.status(400).json({ error: "Invalid email" });
       }
@@ -360,25 +357,34 @@ async function startServer() {
         }
       }
 
-      // Create Firebase Auth user
-      const createResp = await fetch(
-        `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password, returnSecureToken: true }),
-        }
-      );
-      const createData = await createResp.json() as any;
-      if (!createResp.ok) {
-        const msg = createData?.error?.message || 'Failed to create user';
-        if (msg === 'EMAIL_EXISTS') {
-          return res.status(409).json({ error: "Email already exists in Firebase Auth" });
-        }
-        return res.status(400).json({ error: msg });
-      }
+      let newUid: string;
 
-      const newUid = createData.localId;
+      if (googleUid && typeof googleUid === 'string') {
+        // User already authenticated via Google — use their Google Auth UID directly
+        newUid = googleUid;
+      } else {
+        // Legacy path: create Firebase Auth user via email/password
+        if (!firebaseConfig?.apiKey) {
+          return res.status(500).json({ error: "Firebase config not available" });
+        }
+        const createResp = await fetch(
+          `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password, returnSecureToken: true }),
+          }
+        );
+        const createData = await createResp.json() as any;
+        if (!createResp.ok) {
+          const msg = createData?.error?.message || 'Failed to create user';
+          if (msg === 'EMAIL_EXISTS') {
+            return res.status(409).json({ error: "Email already exists in Firebase Auth" });
+          }
+          return res.status(400).json({ error: msg });
+        }
+        newUid = createData.localId;
+      }
 
       // Create employee document with full admin permissions
       const adminEmployee = {
