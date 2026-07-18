@@ -550,7 +550,7 @@ const Employees: React.FC = () => {
                                         {record.checkOutTime ? formatTime(record.checkOutTime) : <span className="text-slate-400 italic">...</span>}
                                     </td>
                                     <td className="p-4">
-                                        <span className={`flex items-center gap-2 font-bold ${!record.durationMinutes ? 'text-blue-600' : 'text-slate-800'}`}>
+                                        <span className={`flex items-center gap-2 font-bold ${record.checkOutTime ? 'text-slate-800' : 'text-blue-600'}`}>
                                             <Clock size={16} />
                                             {formatDuration(record.durationMinutes)}
                                         </span>

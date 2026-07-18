@@ -893,20 +893,39 @@ async function startServer() {
       const doc = await firestoreGetDocument(`attendance/${id}`);
       if (!doc) return res.status(404).json({ error: "Record not found" });
 
-      // Ownership check: only the employee who owns the record or an admin can clock out
       const isAdmin = req.employee?.permissions?.includes('employees') || req.employee?.permissions?.includes('settings');
       if (doc.employeeId !== req.uid && !isAdmin) {
         return res.status(403).json({ error: "Cannot clock out another employee's record" });
       }
 
       if (doc.checkOutTime) return res.json({ ok: true });
+
       const now = new Date();
-      const diffMs = now.getTime() - new Date(doc.checkInTime).getTime();
-      const diffMins = Math.round(diffMs / 60000);
-      doc.checkOutTime = now.toISOString();
-      doc.durationMinutes = diffMins;
-      await firestoreSetDocument("attendance", id, doc);
-      res.json({ ok: true });
+      const checkInTime = doc.checkInTime ? new Date(doc.checkInTime).getTime() : now.getTime();
+      const diffMs = now.getTime() - checkInTime;
+      const diffMins = Math.max(0, Math.round(diffMs / 60000));
+      const checkOutTime = now.toISOString();
+
+      const token = await getGoogleAccessToken();
+      const body = {
+        fields: {
+          checkOutTime: { stringValue: checkOutTime },
+          durationMinutes: { integerValue: String(diffMins) },
+        }
+      };
+      const patchUrl = `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/attendance/${id}?updateMask.fieldPaths=checkOutTime&updateMask.fieldPaths=durationMinutes`;
+      const resp = await fetch(patchUrl, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error("Clockout PATCH failed:", resp.status, errText);
+        throw new Error(`Firestore PATCH failed: ${resp.status}`);
+      }
+
+      res.json({ ok: true, durationMinutes: diffMins });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

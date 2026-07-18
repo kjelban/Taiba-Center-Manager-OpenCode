@@ -1,5 +1,5 @@
 export const formatDuration = (mins?: number | null): string => {
-  if (!mins) return 'جاري العمل...';
+  if (mins === null || mins === undefined) return 'جاري العمل...';
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${h}س ${m}د`;
