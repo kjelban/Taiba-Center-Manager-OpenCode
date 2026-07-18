@@ -1,5 +1,5 @@
 import { Employee, Attendance } from '../types';
-import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection } from './base';
+import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection, getServerSessionToken } from './base';
 import { db } from './firebase';
 import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
 
@@ -40,74 +40,32 @@ export const AttendanceService = {
     return subscribeToCollection<Attendance>(COLLECTIONS.ATTENDANCE, callback);
   },
 
-  closeRecord: async (record: Attendance): Promise<void> => {
-    const checkOut = record.checkOutTime ? new Date(record.checkOutTime) : new Date();
-    const diffMs = checkOut.getTime() - new Date(record.checkInTime).getTime();
-    const diffMins = Math.round(diffMs / 60000);
-    if (!record.checkOutTime) {
-      record.checkOutTime = checkOut.toISOString();
-    }
-    record.durationMinutes = diffMins;
-    await setData(COLLECTIONS.ATTENDANCE, record.id, record);
-  },
-
-  autoCloseOpenSessions: async (employeeId?: string): Promise<void> => {
-    try {
-      const q = query(collection(db, COLLECTIONS.ATTENDANCE), where('checkOutTime', '==', null));
-      const snapshot = await getDocs(q);
-      for (const docSnap of snapshot.docs) {
-        const record = docSnap.data() as Attendance;
-        if (employeeId && record.employeeId !== employeeId) continue;
-        await AttendanceService.closeRecord(record);
-      }
-    } catch { }
-  },
-
-  getActiveSession: async (employeeId: string): Promise<Attendance | null> => {
-    try {
-      const q = query(
-        collection(db, COLLECTIONS.ATTENDANCE),
-        where('employeeId', '==', employeeId),
-        where('checkOutTime', '==', null)
-      );
-      const snapshot = await getDocs(q);
-      if (snapshot.empty) return null;
-      let latest: Attendance | null = null;
-      for (const docSnap of snapshot.docs) {
-        const record = docSnap.data() as Attendance;
-        if (!latest || record.checkInTime > latest.checkInTime) {
-          latest = record;
-        }
-      }
-      return latest;
-    } catch {
-      return null;
-    }
-  },
-
   clockIn: async (employee: Employee): Promise<Attendance> => {
-    const existing = await AttendanceService.getActiveSession(employee.id);
-    if (existing) {
-      return existing;
+    const token = getServerSessionToken();
+    if (!token) throw new Error('Not authenticated');
+    const resp = await fetch('/api/clockin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ employeeId: employee.id, employeeName: employee.name }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.error || 'Clock-in failed');
     }
-    const now = new Date();
-    const newRecord: Attendance = {
-      id: crypto.randomUUID(),
-      employeeId: employee.id,
-      employeeName: employee.name,
-      date: now.toISOString().split('T')[0],
-      checkInTime: now.toISOString(),
-      checkOutTime: null,
-      durationMinutes: null,
-    };
-    await setData(COLLECTIONS.ATTENDANCE, newRecord.id, newRecord);
-    return newRecord;
+    return await resp.json();
   },
 
   clockOut: async (recordId: string): Promise<void> => {
-    const attSnap = await getDoc(doc(db, COLLECTIONS.ATTENDANCE, recordId));
-    if (!attSnap.exists()) return;
-    const record = attSnap.data() as Attendance;
-    await AttendanceService.closeRecord(record);
+    const token = getServerSessionToken();
+    if (!token) throw new Error('Not authenticated');
+    const resp = await fetch('/api/clockout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ id: recordId }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.error || 'Clock-out failed');
+    }
   },
 };

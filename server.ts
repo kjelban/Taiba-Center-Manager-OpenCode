@@ -121,6 +121,43 @@ async function firestoreDeleteDocument(collection: string, id: string) {
   );
   if (!resp.ok && resp.status !== 404) throw new Error(`Firestore DELETE failed: ${resp.status} ${await resp.text()}`);
 }
+
+async function firestoreRunQuery(collection: string, field: string, op: string, value: any): Promise<any[]> {
+  const token = await getGoogleAccessToken();
+  const structuredQuery = {
+    from: [{ collectionId: collection }],
+    where: {
+      fieldFilter: {
+        field: { fieldPath: field },
+        op,
+        value: op === 'IS_NULL' ? { nullValue: null } : { stringValue: value },
+      },
+    },
+  };
+  const resp = await fetch(
+    `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents:runQuery`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structuredQuery }),
+    }
+  );
+  if (!resp.ok) throw new Error(`Firestore QUERY failed: ${resp.status} ${await resp.text()}`);
+  const results = await resp.json() as any[];
+  const docs: any[] = [];
+  for (const r of results) {
+    if (r.document) {
+      const doc: Record<string, any> = { id: r.document.name.split('/').pop() };
+      if (r.document.fields) {
+        for (const [k, v] of Object.entries(r.document.fields)) {
+          doc[k] = firestoreValueToJs(v as any);
+        }
+      }
+      docs.push(doc);
+    }
+  }
+  return docs;
+}
 // ---- end Firestore proxy ----
 
 async function auditLog(eventType: string, userId: string, userEmail: string, details: Record<string, any> = {}) {
@@ -906,6 +943,43 @@ async function startServer() {
       doc.durationMinutes = diffMins;
       await firestoreSetDocument("attendance", id, doc);
       res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/clockin", requireFirebaseAuth, async (req, res) => {
+    try {
+      const { employeeId, employeeName } = req.body;
+      if (!employeeId || !employeeName) return res.status(400).json({ error: "Missing employeeId or employeeName" });
+
+      // Close ALL existing open sessions for this employee (atomic-ish: close then create)
+      const openSessions = await firestoreRunQuery('attendance', 'checkOutTime', 'IS_NULL', null);
+      const now = Date.now();
+      for (const session of openSessions) {
+        if (session.employeeId !== employeeId) continue;
+        const checkIn = new Date(session.checkInTime).getTime();
+        const diffMs = now - checkIn;
+        const diffMins = Math.round(diffMs / 60000);
+        session.checkOutTime = new Date(now).toISOString();
+        session.durationMinutes = diffMins;
+        await firestoreSetDocument('attendance', session.id, session);
+      }
+
+      // Create new session
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const newDate = new Date().toISOString().split('T')[0];
+      const newSession = {
+        id,
+        employeeId,
+        employeeName,
+        date: newDate,
+        checkInTime: new Date().toISOString(),
+        checkOutTime: null,
+        durationMinutes: null,
+      };
+      await firestoreSetDocument('attendance', id, newSession);
+      res.json(newSession);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
