@@ -6,6 +6,14 @@ import { setServerSessionToken } from '../../services/base';
 
 const STORAGE_KEY_USER = 'taiba_current_user';
 const STORAGE_KEY_SESSION = 'taiba_current_session';
+const STORAGE_KEY_LAST_SESSION = 'taiba_last_session';
+const SESSION_FRESHNESS_MS = 30_000;
+
+interface LastSessionInfo {
+  employeeId: string;
+  sessionId: string;
+  lastActivity: string;
+}
 
 interface AuthContextType {
   currentUser: Employee | null;
@@ -33,7 +41,6 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<Employee | null>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
 
-  // Restore user from localStorage on mount
   useEffect(() => {
     const restoreUser = async () => {
       try {
@@ -44,20 +51,34 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         }
         const employee: Employee = JSON.parse(storedUser);
 
-        // Validate employee still exists in Firestore
         const fresh = await EmployeeService.getEmployee(employee.id);
         if (!fresh) {
           localStorage.removeItem(STORAGE_KEY_USER);
           localStorage.removeItem(STORAGE_KEY_SESSION);
+          localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
           setIsInitialLoading(false);
           return;
         }
 
         setCurrentUser(fresh);
         localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(fresh));
+
+        const lastInfoRaw = localStorage.getItem(STORAGE_KEY_LAST_SESSION);
+        if (lastInfoRaw) {
+          const info: LastSessionInfo = JSON.parse(lastInfoRaw);
+          const elapsed = Date.now() - new Date(info.lastActivity).getTime();
+          if (elapsed > SESSION_FRESHNESS_MS) {
+            localStorage.removeItem(STORAGE_KEY_SESSION);
+            localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
+            if (info.sessionId) {
+              AttendanceService.clockOut(info.sessionId).catch(() => {});
+            }
+          }
+        }
       } catch {
         localStorage.removeItem(STORAGE_KEY_USER);
         localStorage.removeItem(STORAGE_KEY_SESSION);
+        localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
       } finally {
         setIsInitialLoading(false);
       }
@@ -66,43 +87,42 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   }, []);
 
   const handleLogin = useCallback(async (employee: Employee) => {
+    const lastInfoRaw = localStorage.getItem(STORAGE_KEY_LAST_SESSION);
+    if (lastInfoRaw) {
+      try {
+        const info: LastSessionInfo = JSON.parse(lastInfoRaw);
+        const elapsed = Date.now() - new Date(info.lastActivity).getTime();
+        const sameEmployee = info.employeeId === employee.id;
+
+        if (sameEmployee && elapsed <= SESSION_FRESHNESS_MS) {
+          setCurrentUser(employee);
+          localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(employee));
+          info.lastActivity = new Date().toISOString();
+          localStorage.setItem(STORAGE_KEY_LAST_SESSION, JSON.stringify(info));
+          return;
+        }
+
+        if (info.sessionId) {
+          await AttendanceService.clockOut(info.sessionId).catch(() => {});
+        }
+        localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
+      } catch {}
+    }
+
+    const session = await AttendanceService.clockIn(employee);
+    const sessionWithActivity = { ...session, lastActivity: new Date().toISOString() };
+    localStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(sessionWithActivity));
+    localStorage.setItem(STORAGE_KEY_LAST_SESSION, JSON.stringify({
+      employeeId: employee.id,
+      sessionId: session.id,
+      lastActivity: new Date().toISOString(),
+    }));
+
     setCurrentUser(employee);
     localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(employee));
-
-    try {
-      // Close any existing session first (handles orphaned sessions)
-      const existingSession = localStorage.getItem(STORAGE_KEY_SESSION);
-      if (existingSession) {
-        try {
-          const parsed = JSON.parse(existingSession);
-          if (parsed?.id) {
-            await AttendanceService.clockOut(parsed.id).catch(() => {});
-          }
-        } catch {}
-        localStorage.removeItem(STORAGE_KEY_SESSION);
-      }
-
-      // Clock in new session
-      const session = await AttendanceService.clockIn(employee);
-      localStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(session));
-    } catch (e) {
-      console.error("Attendance error:", e);
-    }
   }, []);
 
   const confirmLogout = useCallback(async () => {
-    const sessionData = localStorage.getItem(STORAGE_KEY_SESSION);
-    if (sessionData) {
-      try {
-        const session = JSON.parse(sessionData);
-        if (session.id) {
-          await AttendanceService.clockOut(session.id);
-        }
-      } catch (e) {
-        console.error("Clock-out error:", e);
-      }
-    }
-    localStorage.removeItem(STORAGE_KEY_SESSION);
     localStorage.removeItem(STORAGE_KEY_USER);
     setServerSessionToken(null);
     setCurrentUser(null);
