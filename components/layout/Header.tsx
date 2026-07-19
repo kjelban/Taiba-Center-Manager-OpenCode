@@ -28,15 +28,18 @@ const Header: React.FC<HeaderProps> = ({
 
   useEffect(() => {
     let interval: number;
-    if (currentUser && currentSession) {
+    if (currentUser && currentSession?.checkInTime) {
         const calculateDuration = () => {
             const start = new Date(currentSession.checkInTime).getTime();
-            const now = new Date().getTime();
-            setWorkDuration(Math.floor((now - start) / 60000));
+            if (isNaN(start)) { setWorkDuration(0); return; }
+            const diff = Math.max(0, Date.now() - start);
+            setWorkDuration(Math.floor(diff / 60000));
         };
         
         calculateDuration();
         interval = window.setInterval(calculateDuration, 60000);
+    } else {
+        setWorkDuration(0);
     }
     return () => clearInterval(interval);
   }, [currentUser, currentSession]);
