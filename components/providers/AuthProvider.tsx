@@ -37,6 +37,12 @@ interface AuthProviderProps {
   children: React.ReactNode;
 }
 
+async function closeSession(sessionId: string): Promise<void> {
+  try {
+    await AttendanceService.clockOut(sessionId);
+  } catch {}
+}
+
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<Employee | null>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
@@ -46,6 +52,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       try {
         const storedUser = localStorage.getItem(STORAGE_KEY_USER);
         if (!storedUser) {
+          localStorage.removeItem(STORAGE_KEY_SESSION);
+          localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
           setIsInitialLoading(false);
           return;
         }
@@ -70,9 +78,6 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           if (elapsed > SESSION_FRESHNESS_MS) {
             localStorage.removeItem(STORAGE_KEY_SESSION);
             localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
-            if (info.sessionId) {
-              AttendanceService.clockOut(info.sessionId).catch(() => {});
-            }
           }
         }
       } catch {
@@ -91,21 +96,28 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     if (lastInfoRaw) {
       try {
         const info: LastSessionInfo = JSON.parse(lastInfoRaw);
-        const elapsed = Date.now() - new Date(info.lastActivity).getTime();
         const sameEmployee = info.employeeId === employee.id;
+        const elapsed = Date.now() - new Date(info.lastActivity).getTime();
 
         if (sameEmployee && elapsed <= SESSION_FRESHNESS_MS) {
-          setCurrentUser(employee);
-          localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(employee));
-          info.lastActivity = new Date().toISOString();
-          localStorage.setItem(STORAGE_KEY_LAST_SESSION, JSON.stringify(info));
-          return;
+          const stored = localStorage.getItem(STORAGE_KEY_SESSION);
+          if (stored) {
+            const session = JSON.parse(stored);
+            if (session?.id && session?.checkInTime && !session?.checkOutTime) {
+              setCurrentUser(employee);
+              localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(employee));
+              info.lastActivity = new Date().toISOString();
+              localStorage.setItem(STORAGE_KEY_LAST_SESSION, JSON.stringify(info));
+              return;
+            }
+          }
         }
 
         if (info.sessionId) {
-          await AttendanceService.clockOut(info.sessionId).catch(() => {});
+          await closeSession(info.sessionId);
         }
         localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
+        localStorage.removeItem(STORAGE_KEY_SESSION);
       } catch {}
     }
 
@@ -123,6 +135,31 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   }, []);
 
   const confirmLogout = useCallback(async () => {
+    const sessionData = localStorage.getItem(STORAGE_KEY_SESSION);
+    const lastInfoRaw = localStorage.getItem(STORAGE_KEY_LAST_SESSION);
+
+    let sessionId: string | null = null;
+    if (sessionData) {
+      try {
+        const session = JSON.parse(sessionData);
+        if (session?.id && !session?.checkOutTime) {
+          sessionId = session.id;
+        }
+      } catch {}
+    }
+    if (!sessionId && lastInfoRaw) {
+      try {
+        const info: LastSessionInfo = JSON.parse(lastInfoRaw);
+        if (info.sessionId) sessionId = info.sessionId;
+      } catch {}
+    }
+
+    if (sessionId) {
+      await closeSession(sessionId);
+    }
+
+    localStorage.removeItem(STORAGE_KEY_SESSION);
+    localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
     localStorage.removeItem(STORAGE_KEY_USER);
     setServerSessionToken(null);
     setCurrentUser(null);
