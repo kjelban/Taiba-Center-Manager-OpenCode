@@ -301,48 +301,6 @@ const Reports: React.FC = () => {
       }
     });
 
-    // ── Sheet 5: ملخص مدة العمل اليومية ──
-    if (filteredAttendance.length > 0) {
-      const ws5 = workbook.addWorksheet('ملخص مدة العمل اليومية');
-      ws5.columns = [{ width: 24 }, { width: 18 }, { width: 20 }];
-      ws5.addRow(['اسم المستخدم', 'التاريخ', 'مجموع ساعات العمل']).eachCell(cell => {
-        cell.font = hdrF; cell.fill = hdrBg; cell.alignment = { horizontal: 'center', vertical: 'middle' }; cell.border = b;
-      });
-      ws5.getRow(1).height = 26;
-
-      const allDays = new Set<string>();
-      Object.values(attendanceByEmployeeAndDay).forEach(days => {
-        Object.keys(days).forEach(d => allDays.add(d));
-      });
-      const sortedDays = Array.from(allDays).sort().reverse();
-
-      let grandTotalMinutes = 0;
-      sortedDays.forEach(day => {
-        Object.entries(attendanceByEmployeeAndDay).forEach(([empId, days]) => {
-          if (!days[day]) return;
-          const sessions = days[day];
-          const empName = sessions[0]?.employeeName || empId;
-          const dayTotal = sessions.reduce((s, a) => s + (a.durationMinutes || 0), 0);
-          grandTotalMinutes += dayTotal;
-          const h = Math.floor(dayTotal / 60);
-          const m = dayTotal % 60;
-          const row = ws5.addRow([empName, day, `${h}س ${m}د`]);
-          row.eachCell((cell: any, col: number) => {
-            cell.font = dataF; cell.border = b; cell.alignment = col === 1 ? c('right') : c('center');
-          });
-        });
-      });
-
-      const gh = Math.floor(grandTotalMinutes / 60);
-      const gm = grandTotalMinutes % 60;
-      const totalRow = ws5.addRow(['الإجمالي', '', `${gh}س ${gm}د`]);
-      totalRow.eachCell((cell: any, col: number) => {
-        cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11, name: 'Arial' };
-        cell.fill = greenBg; cell.border = b; cell.alignment = c('center');
-        if (col === 1) cell.alignment = c('right');
-      });
-    }
-
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);

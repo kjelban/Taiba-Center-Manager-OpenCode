@@ -323,6 +323,45 @@ const Employees: React.FC = () => {
       if (col === 4) cell.numFmt = '#,##0.00';
     });
 
+    // ── Sheet 3: ملخص مدة العمل اليومية ──
+    const ws3 = workbook.addWorksheet('ملخص مدة العمل اليومية');
+    ws3.columns = [{ width: 24 }, { width: 18 }, { width: 20 }];
+    const h3 = ws3.addRow(['اسم المستخدم', 'التاريخ', 'مجموع ساعات العمل']);
+    h3.eachCell(cell => { cell.font = hdrF; cell.fill = hdrBg; cell.alignment = al('center'); cell.border = b; });
+    ws3.getRow(1).height = 26;
+
+    const dailyMap: Record<string, Record<string, number>> = {};
+    attendanceRecords.forEach(rec => {
+      const empName = rec.employeeName;
+      const day = rec.date || rec.checkInTime.split('T')[0];
+      if (!dailyMap[empName]) dailyMap[empName] = {};
+      dailyMap[empName][day] = (dailyMap[empName][day] || 0) + (rec.durationMinutes || 0);
+    });
+
+    const allDaysSet = new Set<string>();
+    Object.values(dailyMap).forEach(days => Object.keys(days).forEach(d => allDaysSet.add(d)));
+    const sortedDays = Array.from(allDaysSet).sort().reverse();
+
+    let grandTotalMins = 0;
+    sortedDays.forEach(day => {
+      Object.entries(dailyMap).forEach(([empName, days]) => {
+        if (days[day] === undefined) return;
+        const mins = days[day];
+        grandTotalMins += mins;
+        const row = ws3.addRow([empName, day, `${Math.floor(mins / 60)}س ${mins % 60}د`]);
+        row.eachCell((cell: any, col: number) => {
+          cell.font = dataF; cell.border = b; cell.alignment = col === 1 ? al('right') : al('center');
+        });
+      });
+    });
+
+    const gtr3 = ws3.addRow(['الإجمالي', '', `${Math.floor(grandTotalMins / 60)}س ${grandTotalMins % 60}د`]);
+    gtr3.eachCell((cell: any, col: number) => {
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11, name: 'Arial' };
+      cell.fill = greenBg; cell.border = b; cell.alignment = al('center');
+      if (col === 1) cell.alignment = al('right');
+    });
+
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
