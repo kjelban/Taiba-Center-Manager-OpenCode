@@ -8,5 +8,14 @@
       "database": "ai-studio-taibacentermanag-c767774a-873a-4b8d-81a6-1c3761dba0ea",
       "rules": "firestore.rules"
     }
-  ]
+  ],
+  "emulators": {
+    "firestore": {
+      "port": 8080
+    },
+    "ui": {
+      "enabled": true,
+      "port": 4000
+    }
+  }
 }
