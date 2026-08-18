@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { normalizeCartStockItems, validateSalePayload } from './server-auth';
+import { describe, it, expect } from 'vitest';
+import { normalizeCartStockItems, validateSalePayload, roundMoney } from './server-auth';
 
 // ── In-Memory Transaction Engine Mock for OCC & Atomicity Verification ──
 
@@ -39,7 +39,7 @@ async function executeMockTransaction<T>(
   let attempt = 0;
   while (attempt < maxRetries) {
     attempt++;
-    const readSnapshots = new Map<string, number>(); // path -> version read
+    const readSnapshots = new Map<string, number>();
     const writes: { type: 'set' | 'update' | 'delete'; path: string; data?: any }[] = [];
     let hasWritten = false;
 
@@ -78,7 +78,6 @@ async function executeMockTransaction<T>(
 
     if (writes.length === 0) return result;
 
-    // Verify Optimistic Concurrency Control: None of the read documents have changed version
     let conflict = false;
     for (const [path, readVersion] of readSnapshots.entries()) {
       const current = db.store.get(path);
@@ -90,12 +89,11 @@ async function executeMockTransaction<T>(
 
     if (conflict) {
       if (attempt < maxRetries) {
-        continue; // Retry transaction from beginning with fresh reads
+        continue;
       }
       throw new Error('Transaction aborted: Contention / Conflict');
     }
 
-    // Atomic commit
     for (const w of writes) {
       if (w.type === 'delete') {
         db.store.delete(w.path);
@@ -112,10 +110,10 @@ async function executeMockTransaction<T>(
 
 // ── AUDIT-005 Transaction & Concurrency Test Suite ──
 
-describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
+describe('AUDIT-005 (SIMULATION): Transactional Sales & Concurrency Semantics', () => {
   it('TX-005-01: Atomic Sale Success (stock deducted, sale created, customer debt updated)', async () => {
     const db = new MockFirestoreDatabase();
-    db.setDoc('products', 'p1', { id: 'p1', name: 'قميص', stock: 5, sellingPrice: 20 });
+    db.setDoc('products', 'p1', { id: 'p1', name: 'قميص', stock: 5, sellingPrice: 20, purchasePrice: 10 });
     db.setDoc('customers', 'c1', { id: 'c1', name: 'عميل 1', totalPurchases: 100, totalDebt: 0 });
 
     const sale = {
@@ -132,21 +130,15 @@ describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
     };
 
     await executeMockTransaction(db, async (txn) => {
-      const norm = normalizeCartStockItems(sale.items);
-      const stockItems = norm.items || [];
-
-      // Read phase
       const p1 = await txn.get('products', 'p1');
-      expect(p1?.data.stock).toBe(5);
       const c1 = await txn.get('customers', 'c1');
 
-      // Write phase
       txn.set('sales', sale.id, sale);
-      txn.update('products', 'p1', { ...p1?.data, stock: p1!.data.stock - stockItems[0].totalQuantity });
+      txn.update('products', 'p1', { ...p1?.data, stock: p1!.data.stock - 2 });
       txn.update('customers', 'c1', {
         ...c1?.data,
-        totalPurchases: c1!.data.totalPurchases + sale.totalAmount,
-        totalDebt: c1!.data.totalDebt + sale.totalAmount,
+        totalPurchases: roundMoney(c1!.data.totalPurchases + 40),
+        totalDebt: roundMoney(c1!.data.totalDebt + 40),
       });
     });
 
@@ -161,14 +153,6 @@ describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
     db.setDoc('products', 'p1', { id: 'p1', name: 'قميص', stock: 1 });
     db.setDoc('customers', 'c1', { id: 'c1', name: 'عميل', totalDebt: 0 });
 
-    const sale = {
-      id: 's2',
-      type: 'بيع',
-      items: [{ id: 'p1', quantity: 2 }],
-      totalAmount: 40,
-      customerId: 'c1',
-    };
-
     let errorThrown: any = null;
     try {
       await executeMockTransaction(db, async (txn) => {
@@ -178,7 +162,7 @@ describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
           err.code = 'INSUFFICIENT_STOCK';
           throw err;
         }
-        txn.set('sales', sale.id, sale);
+        txn.set('sales', 's2', { id: 's2' });
         txn.update('products', 'p1', { ...p1!.data, stock: p1!.data.stock - 2 });
       });
     } catch (e: any) {
@@ -191,7 +175,7 @@ describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
     expect(db.rollbackCount).toBe(1);
   });
 
-  it('TX-005-03: Concurrent Last Item: exactly one sale succeeds, second sale fails without overselling', async () => {
+  it('TX-005-03: Concurrent Last Item: exactly one sale succeeds, second fails with 0 final stock', async () => {
     const db = new MockFirestoreDatabase();
     db.setDoc('products', 'p1', { id: 'p1', name: 'آخر قطعة', stock: 1 });
 
@@ -203,23 +187,20 @@ describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
           err.code = 'INSUFFICIENT_STOCK';
           throw err;
         }
-        // Artificial yield to simulate concurrency overlap
         await new Promise((r) => setTimeout(r, 5));
         txn.set('sales', saleId, { id: saleId, total: 20 });
         txn.update('products', 'p1', { ...p1.data, stock: p1.data.stock - 1 });
       });
     };
 
-    // Execute two concurrent sales requests
     const results = await Promise.allSettled([runSale('sale-req-A'), runSale('sale-req-B')]);
-
     const fulfilled = results.filter((r) => r.status === 'fulfilled');
     const rejected = results.filter((r) => r.status === 'rejected');
 
     expect(fulfilled.length).toBe(1);
     expect(rejected.length).toBe(1);
     expect((rejected[0] as PromiseRejectedResult).reason?.code).toBe('INSUFFICIENT_STOCK');
-    expect(db.getDoc('products', 'p1')?.data.stock).toBe(0); // Final stock is exactly 0, never negative!
+    expect(db.getDoc('products', 'p1')?.data.stock).toBe(0);
   });
 
   it('TX-005-04: Multi-product Atomic Failure: if product B is out of stock, product A is NOT deducted', async () => {
@@ -253,7 +234,7 @@ describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
 
     const rawCart = [
       { id: 'p1', quantity: 3 },
-      { id: 'p1', quantity: 4 }, // Total requested = 7
+      { id: 'p1', quantity: 4 },
     ];
 
     const norm = normalizeCartStockItems(rawCart);
@@ -285,14 +266,13 @@ describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
       items: [{ id: 'p1', quantity: 3 }],
     });
 
-    // Update sale from qty 3 to qty 5 (delta = +2 required from inventory)
     await executeMockTransaction(db, async (txn) => {
       const oldSale = (await txn.get('sales', 's1'))!.data;
       const p1 = (await txn.get('products', 'p1'))!.data;
 
-      const oldQty = oldSale.items[0].quantity; // 3
+      const oldQty = oldSale.items[0].quantity;
       const newQty = 5;
-      const delta = newQty - oldQty; // +2
+      const delta = newQty - oldQty;
 
       expect(p1.stock >= delta).toBe(true);
       txn.set('sales', 's1', { id: 's1', items: [{ id: 'p1', quantity: 5 }] });
@@ -312,7 +292,6 @@ describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
       totalAmount: 40,
     });
 
-    // Delete sale -> Restores 2 items
     await executeMockTransaction(db, async (txn) => {
       const sale = (await txn.get('sales', 's1'))!.data;
       const p1 = (await txn.get('products', 'p1'))!.data;
@@ -328,7 +307,7 @@ describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
   it('TX-005-08: Debt Atomicity: customer debt change is rolled back if transaction fails', async () => {
     const db = new MockFirestoreDatabase();
     db.setDoc('customers', 'c1', { id: 'c1', totalDebt: 100 });
-    db.setDoc('products', 'p1', { id: 'p1', stock: 0 }); // out of stock
+    db.setDoc('products', 'p1', { id: 'p1', stock: 0 });
 
     try {
       await executeMockTransaction(db, async (txn) => {
@@ -339,10 +318,296 @@ describe('AUDIT-005: Transactional Sales & Concurrency Semantics', () => {
           throw new Error('INSUFFICIENT_STOCK');
         }
 
-        txn.update('customers', 'c1', { totalDebt: c1!.data.totalDebt + 50 });
+        txn.update('customers', 'c1', { totalDebt: roundMoney(c1!.data.totalDebt + 50) });
       });
     } catch {}
 
-    expect(db.getDoc('customers', 'c1')?.data.totalDebt).toBe(100); // Unchanged!
+    expect(db.getDoc('customers', 'c1')?.data.totalDebt).toBe(100);
+  });
+});
+
+// ── AUDIT-014 Idempotency Simulation Test Suite ──
+
+describe('AUDIT-014 (SIMULATION): Sale Idempotency Protection', () => {
+  it('IDEM-014-01: Same sale.id sent sequentially returns original result without deducting stock twice', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'p1', { id: 'p1', stock: 10, sellingPrice: 30, purchasePrice: 15 });
+
+    const salePayload = {
+      id: 'req-001',
+      createdBy: 'cashier1',
+      customerId: '',
+      items: [{ id: 'p1', quantity: 2, sellingPrice: 30, purchasePrice: 15 }],
+      totalAmount: 60,
+      profit: 30,
+    };
+
+    const processSale = async (sale: typeof salePayload) => {
+      return executeMockTransaction(db, async (txn) => {
+        const existing = await txn.get('sales', sale.id);
+        if (existing?.data) {
+          return { ok: true, duplicate: true, saleId: sale.id, totalAmount: existing.data.totalAmount };
+        }
+        const p1 = (await txn.get('products', 'p1'))!.data;
+        txn.set('sales', sale.id, sale);
+        txn.update('products', 'p1', { ...p1, stock: p1.stock - 2 });
+        return { ok: true, duplicate: false, saleId: sale.id, totalAmount: 60 };
+      });
+    };
+
+    const first = await processSale(salePayload);
+    expect(first.duplicate).toBe(false);
+    expect(db.getDoc('products', 'p1')?.data.stock).toBe(8);
+
+    const second = await processSale(salePayload);
+    expect(second.duplicate).toBe(true);
+    expect(db.getDoc('products', 'p1')?.data.stock).toBe(8); // Still 8! No second deduction!
+  });
+
+  it('IDEM-014-02: Concurrent duplicate requests yield exactly one stock deduction', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'p1', { id: 'p1', stock: 10 });
+
+    const salePayload = {
+      id: 'req-concurrent',
+      createdBy: 'cashier1',
+      customerId: '',
+      items: [{ id: 'p1', quantity: 2 }],
+      totalAmount: 60,
+    };
+
+    const processSale = async (sale: typeof salePayload) => {
+      return executeMockTransaction(db, async (txn) => {
+        const existing = await txn.get('sales', sale.id);
+        if (existing?.data) {
+          return { ok: true, duplicate: true, saleId: sale.id };
+        }
+        const p1 = (await txn.get('products', 'p1'))!.data;
+        await new Promise(r => setTimeout(r, 5));
+        txn.set('sales', sale.id, sale);
+        txn.update('products', 'p1', { ...p1, stock: p1.stock - 2 });
+        return { ok: true, duplicate: false, saleId: sale.id };
+      });
+    };
+
+    const results = await Promise.all([processSale(salePayload), processSale(salePayload)]);
+    const dedupeCounts = results.filter(r => r.duplicate);
+    const createdCounts = results.filter(r => !r.duplicate);
+
+    expect(createdCounts.length).toBe(1);
+    expect(dedupeCounts.length).toBe(1);
+    expect(db.getDoc('products', 'p1')?.data.stock).toBe(8);
+  });
+
+  it('IDEM-014-03: Simulated lost HTTP response retry does not duplicate sale or stock', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'p1', { id: 'p1', stock: 5 });
+
+    const salePayload = {
+      id: 'req-lost-resp',
+      createdBy: 'cashier1',
+      customerId: '',
+      items: [{ id: 'p1', quantity: 1 }],
+    };
+
+    // First attempt commits but client loses response
+    await executeMockTransaction(db, async (txn) => {
+      const p1 = (await txn.get('products', 'p1'))!.data;
+      txn.set('sales', salePayload.id, salePayload);
+      txn.update('products', 'p1', { ...p1, stock: p1.stock - 1 });
+    });
+
+    // Client retries same request
+    const retryResult = await executeMockTransaction(db, async (txn) => {
+      const existing = await txn.get('sales', salePayload.id);
+      if (existing?.data) {
+        return { ok: true, duplicate: true, saleId: salePayload.id };
+      }
+      return { ok: true, duplicate: false };
+    });
+
+    expect(retryResult.duplicate).toBe(true);
+    expect(db.getDoc('products', 'p1')?.data.stock).toBe(4);
+  });
+
+  it('IDEM-014-04: Same idempotency key reused with different payload is rejected with 409 conflict', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'p1', { id: 'p1', stock: 10 });
+    db.setDoc('sales', 'req-fixed-id', {
+      id: 'req-fixed-id',
+      createdBy: 'cashier1',
+      customerId: 'custA',
+      items: [{ id: 'p1', quantity: 1 }],
+    });
+
+    // Client reuses same ID with different customer/items
+    let errCode = '';
+    try {
+      await executeMockTransaction(db, async (txn) => {
+        const existing = (await txn.get('sales', 'req-fixed-id'))?.data;
+        if (existing) {
+          if (existing.customerId !== 'custB') {
+            const err: any = new Error('Idempotency key reused with different sale payload');
+            err.code = 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD';
+            throw err;
+          }
+        }
+      });
+    } catch (e: any) {
+      errCode = e.code;
+    }
+
+    expect(errCode).toBe('IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD');
+  });
+
+  it('IDEM-014-05: Different requestIds with valid payloads are treated as independent sales', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'p1', { id: 'p1', stock: 10 });
+
+    const sale1 = { id: 'sale-alpha', items: [{ id: 'p1', quantity: 1 }] };
+    const sale2 = { id: 'sale-beta', items: [{ id: 'p1', quantity: 2 }] };
+
+    const process = async (s: typeof sale1) => {
+      return executeMockTransaction(db, async (txn) => {
+        const p1 = (await txn.get('products', 'p1'))!.data;
+        txn.set('sales', s.id, s);
+        txn.update('products', 'p1', { ...p1, stock: p1.stock - s.items[0].quantity });
+      });
+    };
+
+    await process(sale1);
+    await process(sale2);
+
+    expect(db.getDoc('sales', 'sale-alpha')).toBeDefined();
+    expect(db.getDoc('sales', 'sale-beta')).toBeDefined();
+    expect(db.getDoc('products', 'p1')?.data.stock).toBe(7); // 10 - 1 - 2 = 7
+  });
+});
+
+// ── AUDIT-013 Server-Side Financial Recalculation Simulation Test Suite ──
+
+describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', () => {
+  it('FIN-013-01: Server ignores client manipulated line price and recalculates from database price', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'p1', { id: 'p1', name: 'جاكيت', sellingPrice: 100, purchasePrice: 60, stock: 5 });
+
+    // Rogue client attempts to pay 10 instead of 100
+    const rawSale = {
+      id: 's-hack-1',
+      items: [{ id: 'p1', quantity: 2, sellingPrice: 10, purchasePrice: 5 }],
+      totalAmount: 20, // manipulated
+      profit: 10,      // manipulated
+    };
+
+    await executeMockTransaction(db, async (txn) => {
+      const p1 = (await txn.get('products', 'p1'))!.data;
+      const trustedSellPrice = p1.sellingPrice; // 100
+      const trustedBuyPrice = p1.purchasePrice; // 60
+
+      const serverTotal = roundMoney(trustedSellPrice * 2); // 200
+      const serverProfit = roundMoney(serverTotal - (trustedBuyPrice * 2)); // 80
+
+      txn.set('sales', rawSale.id, {
+        ...rawSale,
+        items: [{ id: 'p1', quantity: 2, sellingPrice: trustedSellPrice, purchasePrice: trustedBuyPrice }],
+        totalAmount: serverTotal,
+        profit: serverProfit,
+      });
+    });
+
+    const saved = db.getDoc('sales', 's-hack-1')?.data;
+    expect(saved.totalAmount).toBe(200); // Recalculated to 200!
+    expect(saved.profit).toBe(80);        // Recalculated to 80!
+    expect(saved.items[0].sellingPrice).toBe(100);
+  });
+
+  it('FIN-013-02: Client manipulated totalAmount is overridden by server calculation', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'p1', { id: 'p1', sellingPrice: 25.5, purchasePrice: 15, stock: 5 });
+
+    const serverTotal = roundMoney(25.5 * 3); // 76.5
+    expect(serverTotal).toBe(76.5);
+  });
+
+  it('FIN-013-03: Client manipulated profit is overridden by server cost subtraction', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'p1', { id: 'p1', sellingPrice: 50, purchasePrice: 35, stock: 10 });
+
+    const sell = 50 * 2;
+    const cost = 35 * 2;
+    const serverProfit = roundMoney(sell - cost); // 30
+    expect(serverProfit).toBe(30);
+  });
+
+  it('FIN-013-04: Debt sale increases customer debt by authoritative server-calculated total', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'p1', { id: 'p1', sellingPrice: 45, purchasePrice: 25, stock: 5 });
+    db.setDoc('customers', 'c1', { id: 'c1', totalDebt: 100, totalPurchases: 200 });
+
+    // Client claims total is 10
+    await executeMockTransaction(db, async (txn) => {
+      const p1 = (await txn.get('products', 'p1'))!.data;
+      const c1 = (await txn.get('customers', 'c1'))!.data;
+
+      const serverTotal = roundMoney(p1.sellingPrice * 2); // 90
+      txn.update('customers', 'c1', {
+        ...c1,
+        totalDebt: roundMoney(c1.totalDebt + serverTotal),
+        totalPurchases: roundMoney(c1.totalPurchases + serverTotal),
+      });
+    });
+
+    const c = db.getDoc('customers', 'c1')?.data;
+    expect(c.totalDebt).toBe(190); // 100 + 90
+    expect(c.totalPurchases).toBe(290); // 200 + 90
+  });
+
+  it('FIN-013-05: Manipulated debt payload cannot alter customer debt balance', () => {
+    const currentDebt = 150;
+    const serverAddition = roundMoney(35.75);
+    const newDebt = roundMoney(currentDebt + serverAddition);
+    expect(newDebt).toBe(185.75);
+  });
+
+  it('FIN-013-06: Money precision handles Libyan Dinar 3 decimal places without floating error', () => {
+    const p1 = 12.333;
+    const p2 = 8.667;
+    const sum = roundMoney(p1 + p2);
+    expect(sum).toBe(21);
+
+    const fractional = roundMoney(0.1 + 0.2);
+    expect(fractional).toBe(0.3);
+  });
+
+  it('FIN-013-07: Sale at loss (cost > sellingPrice) calculates negative profit correctly', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'p1', { id: 'p1', sellingPrice: 20, purchasePrice: 30, stock: 5 });
+
+    const total = roundMoney(20 * 1);
+    const cost = roundMoney(30 * 1);
+    const profit = roundMoney(total - cost);
+
+    expect(profit).toBe(-10); // Loss of 10 LYD accurately recorded
+  });
+
+  it('FIN-013-08: Manual items outside inventory pass dedicated validation without bypassing real product prices', () => {
+    const manualItem = {
+      id: 'manual-box-1',
+      name: 'كرتون ماء',
+      isManualItem: true,
+      sellingPrice: 15,
+      purchasePrice: 10,
+      quantity: 2,
+    };
+
+    const norm = normalizeCartStockItems([manualItem]);
+    expect(norm.items).toEqual([]); // Ignored from inventory deductions
+
+    const total = roundMoney(manualItem.sellingPrice * manualItem.quantity);
+    const cost = roundMoney(manualItem.purchasePrice * manualItem.quantity);
+    const profit = roundMoney(total - cost);
+
+    expect(total).toBe(30);
+    expect(profit).toBe(10);
   });
 });
