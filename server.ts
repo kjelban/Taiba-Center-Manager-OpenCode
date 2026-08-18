@@ -15,6 +15,7 @@ import {
   validateSalePayload,
   normalizeCartStockItems,
   roundMoney,
+  generateSaleRequestFingerprint,
 } from './server-auth';
 
 declare global {
@@ -1083,18 +1084,28 @@ ${JSON.stringify(summary, null, 2)}
       if (norm.error) return res.status(400).json({ error: norm.error });
       const stockItems = norm.items || [];
 
+      // Calculate Canonical Intent Fingerprint for Idempotency (AUDIT-014)
+      const incomingFingerprint = generateSaleRequestFingerprint(sale);
+
       const result = await runFirestoreTransaction(async (txn) => {
-        // --- 1. IDEMPOTENCY CHECK (AUDIT-014) ---
+        // --- 1. IDEMPOTENCY CHECK (AUDIT-014: Canonical Payload Equivalence) ---
         const existingSaleDoc = await txn.get('sales', sale.id);
         if (existingSaleDoc && existingSaleDoc.data) {
           const existing = existingSaleDoc.data;
-          if (
-            existing.createdBy === sale.createdBy &&
-            existing.customerId === (sale.customerId || '') &&
-            existing.items?.length === sale.items?.length
-          ) {
-            return { ok: true, duplicate: true, saleId: sale.id, totalAmount: existing.totalAmount, profit: existing.profit, message: 'Sale already processed' };
+          // Determine existing fingerprint (support backward compatibility for historical records)
+          const existingFingerprint = existing.requestFingerprint || generateSaleRequestFingerprint(existing);
+
+          if (existingFingerprint === incomingFingerprint) {
+            return {
+              ok: true,
+              duplicate: true,
+              saleId: sale.id,
+              totalAmount: existing.totalAmount,
+              profit: existing.profit,
+              message: 'Sale already processed',
+            };
           }
+
           const err: any = new Error("Idempotency key reused with different sale payload");
           err.code = "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD";
           err.status = 409;
@@ -1124,6 +1135,19 @@ ${JSON.stringify(summary, null, 2)}
           productsMap.set(item.productId, prodDoc.data);
         }
 
+        // Security check for manual items: ensure manual item ID is not masquerading as a catalog product (AUDIT-013)
+        for (const item of (sale.items as any[])) {
+          if (item?.isManualItem && item.id) {
+            const collisionDoc = await txn.get('products', item.id);
+            if (collisionDoc && collisionDoc.data) {
+              const err: any = new Error(`Cannot treat existing catalog product "${collisionDoc.data.name}" as manual item.`);
+              err.code = 'MANUAL_ITEM_CATALOG_COLLISION';
+              err.status = 400;
+              throw err;
+            }
+          }
+        }
+
         let customerDoc: any = null;
         if (sale.customerId) {
           const cust = await txn.get('customers', sale.customerId);
@@ -1137,8 +1161,8 @@ ${JSON.stringify(summary, null, 2)}
         let serverTotalCost = 0;
         const verifiedItems = (sale.items as any[]).map((rawItem: any) => {
           if (rawItem.isManualItem) {
-            const buyPrice = typeof rawItem.purchasePrice === 'number' && Number.isFinite(rawItem.purchasePrice) && rawItem.purchasePrice >= 0 ? rawItem.purchasePrice : 0;
-            const sellPrice = typeof rawItem.sellingPrice === 'number' && Number.isFinite(rawItem.sellingPrice) && rawItem.sellingPrice > 0 ? rawItem.sellingPrice : 0;
+            const buyPrice = typeof rawItem.purchasePrice === 'number' && Number.isFinite(rawItem.purchasePrice) && rawItem.purchasePrice >= 0 ? roundMoney(rawItem.purchasePrice) : 0;
+            const sellPrice = typeof rawItem.sellingPrice === 'number' && Number.isFinite(rawItem.sellingPrice) && rawItem.sellingPrice > 0 ? roundMoney(rawItem.sellingPrice) : 0;
             const qty = rawItem.quantity || 1;
             serverTotalAmount += sellPrice * qty;
             serverTotalCost += buyPrice * qty;
@@ -1150,10 +1174,10 @@ ${JSON.stringify(summary, null, 2)}
           }
 
           const trustedProduct = productsMap.get(rawItem.id);
-          const trustedSellPrice = typeof trustedProduct?.sellingPrice === 'number' ? trustedProduct.sellingPrice : (rawItem.sellingPrice || 0);
-          const trustedBuyPrice = typeof trustedProduct?.purchasePrice === 'number' ? trustedProduct.purchasePrice : (rawItem.purchasePrice || 0);
+          const trustedSellPrice = typeof trustedProduct?.sellingPrice === 'number' ? roundMoney(trustedProduct.sellingPrice) : (rawItem.sellingPrice || 0);
+          const trustedBuyPrice = typeof trustedProduct?.purchasePrice === 'number' ? roundMoney(trustedProduct.purchasePrice) : (rawItem.purchasePrice || 0);
           const qty = rawItem.quantity;
-          
+
           serverTotalAmount += trustedSellPrice * qty;
           serverTotalCost += trustedBuyPrice * qty;
 
@@ -1176,6 +1200,7 @@ ${JSON.stringify(summary, null, 2)}
           items: verifiedItems,
           totalAmount: serverTotalAmount,
           profit: serverProfit,
+          requestFingerprint: incomingFingerprint,
         };
 
         // --- 4. WRITE PHASE (atomic commit) ---
@@ -1281,8 +1306,8 @@ ${JSON.stringify(summary, null, 2)}
         let serverTotalCost = 0;
         const verifiedItems = (sale.items as any[]).map((rawItem: any) => {
           if (rawItem.isManualItem) {
-            const buyPrice = typeof rawItem.purchasePrice === 'number' && Number.isFinite(rawItem.purchasePrice) && rawItem.purchasePrice >= 0 ? rawItem.purchasePrice : 0;
-            const sellPrice = typeof rawItem.sellingPrice === 'number' && Number.isFinite(rawItem.sellingPrice) && rawItem.sellingPrice > 0 ? rawItem.sellingPrice : 0;
+            const buyPrice = typeof rawItem.purchasePrice === 'number' && Number.isFinite(rawItem.purchasePrice) && rawItem.purchasePrice >= 0 ? roundMoney(rawItem.purchasePrice) : 0;
+            const sellPrice = typeof rawItem.sellingPrice === 'number' && Number.isFinite(rawItem.sellingPrice) && rawItem.sellingPrice > 0 ? roundMoney(rawItem.sellingPrice) : 0;
             const qty = rawItem.quantity || 1;
             serverTotalAmount += sellPrice * qty;
             serverTotalCost += buyPrice * qty;
@@ -1290,8 +1315,8 @@ ${JSON.stringify(summary, null, 2)}
           }
 
           const prod = productsMap.get(rawItem.id)?.data;
-          const trustedSellPrice = typeof prod?.sellingPrice === 'number' ? prod.sellingPrice : (rawItem.sellingPrice || 0);
-          const trustedBuyPrice = typeof prod?.purchasePrice === 'number' ? prod.purchasePrice : (rawItem.purchasePrice || 0);
+          const trustedSellPrice = typeof prod?.sellingPrice === 'number' ? roundMoney(prod.sellingPrice) : (rawItem.sellingPrice || 0);
+          const trustedBuyPrice = typeof prod?.purchasePrice === 'number' ? roundMoney(prod.purchasePrice) : (rawItem.purchasePrice || 0);
           const qty = rawItem.quantity;
           serverTotalAmount += trustedSellPrice * qty;
           serverTotalCost += trustedBuyPrice * qty;
@@ -1311,6 +1336,7 @@ ${JSON.stringify(summary, null, 2)}
           items: verifiedItems,
           totalAmount: serverTotalAmount,
           profit: serverProfit,
+          requestFingerprint: generateSaleRequestFingerprint(sale),
         };
 
         // 2. Write phase
