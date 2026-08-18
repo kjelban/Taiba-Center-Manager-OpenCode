@@ -29,13 +29,13 @@ declare global {
 
 // ---- Cryptographic Password Helpers ----
 
-function hashPassword(password: string, salt?: string): string {
+export function hashPassword(password: string, salt?: string): string {
   const s = salt || crypto.randomBytes(16).toString('hex');
   const hash = crypto.pbkdf2Sync(password, s, 100000, 64, 'sha512').toString('hex');
   return `pbkdf2:sha512:100000:${s}:${hash}`;
 }
 
-function verifyPassword(password: string, storedHash: string): boolean {
+export function verifyPassword(password: string, storedHash: string): boolean {
   if (!storedHash) return false;
   if (!storedHash.startsWith('pbkdf2:')) {
     return password === storedHash;
@@ -49,7 +49,7 @@ function verifyPassword(password: string, storedHash: string): boolean {
   return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(originalHash, 'hex'));
 }
 
-function isLegacyPassword(storedHash: string): boolean {
+export function isLegacyPassword(storedHash: string): boolean {
   return !storedHash || !storedHash.startsWith('pbkdf2:');
 }
 
@@ -74,7 +74,11 @@ function getServiceAccountCredentials(): { client_email: string; private_key: st
   return null;
 }
 
-async function getGoogleAccessToken(): Promise<string> {
+export async function getGoogleAccessToken(): Promise<string> {
+  if (process.env.FIRESTORE_EMULATOR_HOST) {
+    return 'emulator-dummy-token';
+  }
+
   if (cachedGoogleToken && cachedGoogleToken.expiresAt > Date.now() + 60000) {
     return cachedGoogleToken.token;
   }
@@ -128,10 +132,17 @@ async function getGoogleAccessToken(): Promise<string> {
 
 // ---- Firestore REST Helpers ----
 
-const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || 'taiba-center-manager';
-const FIRESTORE_DB_PATH = `projects/${PROJECT_ID}/databases/(default)`;
+export const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || 'taiba-center-manager';
+export const FIRESTORE_DB_PATH = `projects/${PROJECT_ID}/databases/(default)`;
 
-function jsToFirestoreValue(val: any): any {
+export function getFirestoreBaseUrl(): string {
+  if (process.env.FIRESTORE_EMULATOR_HOST) {
+    return `http://${process.env.FIRESTORE_EMULATOR_HOST}/v1/${FIRESTORE_DB_PATH}`;
+  }
+  return `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}`;
+}
+
+export function jsToFirestoreValue(val: any): any {
   if (val === null || val === undefined) return { nullValue: null };
   if (typeof val === 'boolean') return { booleanValue: val };
   if (typeof val === 'number') {
@@ -152,7 +163,7 @@ function jsToFirestoreValue(val: any): any {
   return { stringValue: String(val) };
 }
 
-function firestoreValueToJs(val: any): any {
+export function firestoreValueToJs(val: any): any {
   if (!val) return null;
   if ('nullValue' in val) return null;
   if ('booleanValue' in val) return val.booleanValue;
@@ -173,10 +184,11 @@ function firestoreValueToJs(val: any): any {
   return null;
 }
 
-async function firestoreGetDocument(path: string): Promise<any | null> {
+export async function firestoreGetDocument(path: string): Promise<any | null> {
   const token = await getGoogleAccessToken();
+  const baseUrl = getFirestoreBaseUrl();
   const resp = await fetch(
-    `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${path}`,
+    `${baseUrl}/documents/${path}`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
   if (resp.status === 404) return null;
@@ -191,11 +203,12 @@ async function firestoreGetDocument(path: string): Promise<any | null> {
   return result;
 }
 
-async function firestoreSetDocument(collection: string, id: string, data: any) {
+export async function firestoreSetDocument(collection: string, id: string, data: any) {
   const token = await getGoogleAccessToken();
+  const baseUrl = getFirestoreBaseUrl();
   const fields = jsToFirestoreValue(data).mapValue.fields;
   const resp = await fetch(
-    `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${collection}/${id}`,
+    `${baseUrl}/documents/${collection}/${id}`,
     {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -205,10 +218,11 @@ async function firestoreSetDocument(collection: string, id: string, data: any) {
   if (!resp.ok) throw new Error(`Firestore SET failed: ${resp.status} ${await resp.text()}`);
 }
 
-async function firestoreDeleteDocument(collection: string, id: string) {
+export async function firestoreDeleteDocument(collection: string, id: string) {
   const token = await getGoogleAccessToken();
+  const baseUrl = getFirestoreBaseUrl();
   const resp = await fetch(
-    `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${collection}/${id}`,
+    `${baseUrl}/documents/${collection}/${id}`,
     { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
   );
   if (!resp.ok && resp.status !== 404) throw new Error(`Firestore DELETE failed: ${resp.status} ${await resp.text()}`);
@@ -229,6 +243,7 @@ export async function runFirestoreTransaction<T>(
 ): Promise<T> {
   let attempt = 0;
   let previousTxnId: string | undefined;
+  const baseUrl = getFirestoreBaseUrl();
 
   while (attempt < maxRetries) {
     attempt++;
@@ -240,7 +255,7 @@ export async function runFirestoreTransaction<T>(
     }
 
     const beginResp = await fetch(
-      `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents:beginTransaction`,
+      `${baseUrl}/documents:beginTransaction`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -265,7 +280,7 @@ export async function runFirestoreTransaction<T>(
           throw new Error("Firestore transactions require all reads to execute before writes.");
         }
         const resp = await fetch(
-          `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${collection}/${id}?transaction=${encodeURIComponent(txnId)}`,
+          `${baseUrl}/documents/${collection}/${id}?transaction=${encodeURIComponent(txnId)}`,
           {
             headers: { Authorization: `Bearer ${token}` },
           }
@@ -305,7 +320,7 @@ export async function runFirestoreTransaction<T>(
       // Explicitly rollback transaction on business logic error or insufficient stock
       try {
         await fetch(
-          `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents:rollback`,
+          `${baseUrl}/documents:rollback`,
           {
             method: "POST",
             headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -337,7 +352,7 @@ export async function runFirestoreTransaction<T>(
     };
 
     const commitResp = await fetch(
-      `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents:commit`,
+      `${baseUrl}/documents:commit`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -365,7 +380,7 @@ export async function runFirestoreTransaction<T>(
 
 // ---- end Firestore proxy ----
 
-async function auditLog(eventType: string, userId: string, userEmail: string, details: Record<string, any> = {}) {
+export async function auditLog(eventType: string, userId: string, userEmail: string, details: Record<string, any> = {}) {
   try {
     const id = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     await firestoreSetDocument('audit_logs', id, {
@@ -597,8 +612,9 @@ async function startServer() {
   app.get("/api/has-employees", async (req, res) => {
     try {
       const token = await getGoogleAccessToken();
+      const baseUrl = getFirestoreBaseUrl();
       const resp = await fetch(
-        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees?pageSize=1`,
+        `${baseUrl}/documents/employees?pageSize=1`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (!resp.ok) {
@@ -624,8 +640,9 @@ async function startServer() {
       }
 
       const token = await getGoogleAccessToken();
+      const baseUrl = getFirestoreBaseUrl();
       const checkResp = await fetch(
-        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees?pageSize=1`,
+        `${baseUrl}/documents/employees?pageSize=1`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (checkResp.ok) {
@@ -1027,6 +1044,7 @@ ${JSON.stringify(summary, null, 2)}
       }
 
       const token = await getGoogleAccessToken();
+      const baseUrl = getFirestoreBaseUrl();
       const batchBody: any = { writes: writes.map(w => {
         if (w.type === 'set') {
           const fields = jsToFirestoreValue(w.data || {}).mapValue.fields;
@@ -1037,7 +1055,7 @@ ${JSON.stringify(summary, null, 2)}
         }
         return null;
       }).filter(Boolean) };
-      const resp = await fetch(`https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents:commit`, {
+      const resp = await fetch(`${baseUrl}/documents:commit`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify(batchBody),
@@ -1052,9 +1070,10 @@ ${JSON.stringify(summary, null, 2)}
 
   // ---- Firestore batch commit helper (for legacy and maintenance operations) ----
 
-  async function firestoreCommit(writes: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[]): Promise<void> {
+  export async function firestoreCommit(writes: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[]): Promise<void> {
     if (writes.length === 0) return;
     const token = await getGoogleAccessToken();
+    const baseUrl = getFirestoreBaseUrl();
     const batchBody: any = {
       writes: writes.map(w => {
         if (w.type === 'delete') {
@@ -1064,7 +1083,7 @@ ${JSON.stringify(summary, null, 2)}
         return { update: { name: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}`, fields } };
       }),
     };
-    const resp = await fetch(`https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents:commit`, {
+    const resp = await fetch(`${baseUrl}/documents:commit`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(batchBody),
@@ -1584,8 +1603,9 @@ ${JSON.stringify(summary, null, 2)}
       const collectionsToClear = ['products', 'sales', 'expenses', 'employees', 'customers', 'suppliers', 'attendance', 'categories', 'seasons', 'metadata'];
       for (const coll of collectionsToClear) {
         const token = await getGoogleAccessToken();
+        const baseUrl = getFirestoreBaseUrl();
         const listResp = await fetch(
-          `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${coll}`,
+          `${baseUrl}/documents/${coll}`,
           { headers: { Authorization: `Bearer ${token}` } }
         );
         if (listResp.ok) {
@@ -1643,8 +1663,9 @@ ${JSON.stringify(summary, null, 2)}
       const collectionsToClear = ['products', 'sales', 'expenses', 'employees', 'customers', 'suppliers', 'attendance', 'categories', 'seasons', 'metadata'];
       for (const coll of collectionsToClear) {
         const token = await getGoogleAccessToken();
+        const baseUrl = getFirestoreBaseUrl();
         const listResp = await fetch(
-          `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${coll}`,
+          `${baseUrl}/documents/${coll}`,
           { headers: { Authorization: `Bearer ${token}` } }
         );
         if (listResp.ok) {
@@ -1673,8 +1694,9 @@ ${JSON.stringify(summary, null, 2)}
       if (!data || typeof data !== 'object') return res.status(400).json({ error: "Missing migration data" });
 
       const token = await getGoogleAccessToken();
+      const baseUrl = getFirestoreBaseUrl();
       const metaResp = await fetch(
-        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/metadata/migration_status`,
+        `${baseUrl}/documents/metadata/migration_status`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (metaResp.ok) {
@@ -1747,4 +1769,8 @@ ${JSON.stringify(summary, null, 2)}
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
-startServer();
+
+// Only start the server if not running inside a test runner
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
