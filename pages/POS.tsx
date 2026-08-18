@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { Product, CartItem, PaymentMethod, Sale, Employee, Customer, SaleType } from '../types';
 import { DataService } from '../services/dataService';
@@ -94,7 +93,7 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
     setFilteredProducts(
         products.filter(p => 
             p.name.includes(debouncedSearch) || 
-            p.id.includes(debouncedSearch) || 
+            p.id.includes(debouncedSearch) ||
             p.category.includes(debouncedSearch) ||
             (p.barcode && p.barcode.includes(debouncedSearch))
         )
@@ -187,7 +186,6 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
             date.setMonth(date.getMonth() + 1);
             break;
         case 'endMonth':
-            // Set to last day of current month
             const nextMonth = new Date(date.getFullYear(), date.getMonth() + 1, 1);
             date.setTime(nextMonth.getTime() - 1); 
             break;
@@ -217,51 +215,63 @@ const POS: React.FC<POSProps> = ({ currentUser, invoiceToEdit, onClearEdit }) =>
     const totalCost = cart.reduce((sum, item) => sum + (item.purchasePrice * item.quantity), 0);
     const profit = totalAmount - totalCost;
 
-    if (invoiceToEdit) {
-        const updatedSale: Sale = {
-            ...invoiceToEdit,
-            items: cart,
-            totalAmount,
-            paymentMethod,
-            profit,
-            updatedBy: currentUser?.name || 'مجهول',
-            updatedAt: new Date().toISOString(),
-            customerId: selectedCustomer?.id,
-            customerName: selectedCustomer?.name,
-            dueDate: paymentMethod === PaymentMethod.DEBT ? new Date(dueDate).toISOString() : undefined,
-            isPaid: paymentMethod !== PaymentMethod.DEBT
-        };
-        await DataService.updateSale(updatedSale);
-        setLastCompletedSale(updatedSale);
-        setCart([]);
-        setSelectedCustomer(null);
-        setDueDate('');
-        if (onClearEdit) onClearEdit();
-    } else {
-        const newSale: Sale = {
-            id: crypto.randomUUID(),
-            type: SaleType.SALE,
-            date: new Date().toISOString(),
-            items: cart,
-            totalAmount,
-            paymentMethod,
-            profit,
-            createdBy: currentUser?.name || 'مجهول',
-            customerId: selectedCustomer?.id,
-            customerName: selectedCustomer?.name,
-            dueDate: paymentMethod === PaymentMethod.DEBT ? new Date(dueDate).toISOString() : undefined,
-            isPaid: paymentMethod !== PaymentMethod.DEBT
-        };
-        await DataService.createSale(newSale);
-        setLastCompletedSale(newSale);
-        
-        setCart([]);
-        setSelectedCustomer(null);
-        setDueDate('');
+    try {
+      if (invoiceToEdit) {
+          const updatedSale: Sale = {
+              ...invoiceToEdit,
+              items: cart,
+              totalAmount,
+              paymentMethod,
+              profit,
+              updatedBy: currentUser?.name || 'مجهول',
+              updatedAt: new Date().toISOString(),
+              customerId: selectedCustomer?.id,
+              customerName: selectedCustomer?.name,
+              dueDate: paymentMethod === PaymentMethod.DEBT ? new Date(dueDate).toISOString() : undefined,
+              isPaid: paymentMethod !== PaymentMethod.DEBT
+          };
+          await DataService.updateSale(updatedSale);
+          setLastCompletedSale(updatedSale);
+          setCart([]);
+          setSelectedCustomer(null);
+          setDueDate('');
+          if (onClearEdit) onClearEdit();
+      } else {
+          const newSale: Sale = {
+              id: crypto.randomUUID(),
+              type: SaleType.SALE,
+              date: new Date().toISOString(),
+              items: cart,
+              totalAmount,
+              paymentMethod,
+              profit,
+              createdBy: currentUser?.name || 'مجهول',
+              customerId: selectedCustomer?.id,
+              customerName: selectedCustomer?.name,
+              dueDate: paymentMethod === PaymentMethod.DEBT ? new Date(dueDate).toISOString() : undefined,
+              isPaid: paymentMethod !== PaymentMethod.DEBT
+          };
+          await DataService.createSale(newSale);
+          setLastCompletedSale(newSale);
+          
+          setCart([]);
+          setSelectedCustomer(null);
+          setDueDate('');
+      }
+    } catch (err: any) {
+      console.error('Checkout failed:', err);
+      let errorMsg = err.message || 'فشلت عملية البيع';
+      try {
+        const jsonMatch = errorMsg.match(/\{.*\}$/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (parsed.error) errorMsg = parsed.error;
+        }
+      } catch {}
+      alert(errorMsg);
+    } finally {
+      setProcessing(false);
     }
-    
-    // Products will automatically update via subscription
-    setProcessing(false);
   };
 
 
