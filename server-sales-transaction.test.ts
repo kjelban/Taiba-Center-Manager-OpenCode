@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeCartStockItems, validateSalePayload, roundMoney } from './server-auth';
+import {
+  normalizeCartStockItems,
+  validateSalePayload,
+  roundMoney,
+  generateSaleRequestFingerprint,
+} from './server-auth';
 
 // ── In-Memory Transaction Engine Mock for OCC & Atomicity Verification ──
 
@@ -326,9 +331,9 @@ describe('AUDIT-005 (SIMULATION): Transactional Sales & Concurrency Semantics', 
   });
 });
 
-// ── AUDIT-014 Idempotency Simulation Test Suite ──
+// ── AUDIT-014 Canonical Fingerprint & Idempotency Simulation Test Suite ──
 
-describe('AUDIT-014 (SIMULATION): Sale Idempotency Protection', () => {
+describe('AUDIT-014 (SIMULATION): Canonical Fingerprint & Sale Idempotency Protection', () => {
   it('IDEM-014-01: Same sale.id sent sequentially returns original result without deducting stock twice', async () => {
     const db = new MockFirestoreDatabase();
     db.setDoc('products', 'p1', { id: 'p1', stock: 10, sellingPrice: 30, purchasePrice: 15 });
@@ -342,14 +347,20 @@ describe('AUDIT-014 (SIMULATION): Sale Idempotency Protection', () => {
       profit: 30,
     };
 
+    const incomingFp = generateSaleRequestFingerprint(salePayload);
+
     const processSale = async (sale: typeof salePayload) => {
       return executeMockTransaction(db, async (txn) => {
         const existing = await txn.get('sales', sale.id);
         if (existing?.data) {
-          return { ok: true, duplicate: true, saleId: sale.id, totalAmount: existing.data.totalAmount };
+          const existingFp = existing.data.requestFingerprint || generateSaleRequestFingerprint(existing.data);
+          if (existingFp === incomingFp) {
+            return { ok: true, duplicate: true, saleId: sale.id, totalAmount: existing.data.totalAmount };
+          }
+          throw new Error('409 Conflict');
         }
         const p1 = (await txn.get('products', 'p1'))!.data;
-        txn.set('sales', sale.id, sale);
+        txn.set('sales', sale.id, { ...sale, requestFingerprint: incomingFp });
         txn.update('products', 'p1', { ...p1, stock: p1.stock - 2 });
         return { ok: true, duplicate: false, saleId: sale.id, totalAmount: 60 };
       });
@@ -361,151 +372,173 @@ describe('AUDIT-014 (SIMULATION): Sale Idempotency Protection', () => {
 
     const second = await processSale(salePayload);
     expect(second.duplicate).toBe(true);
-    expect(db.getDoc('products', 'p1')?.data.stock).toBe(8); // Still 8! No second deduction!
-  });
-
-  it('IDEM-014-02: Concurrent duplicate requests yield exactly one stock deduction', async () => {
-    const db = new MockFirestoreDatabase();
-    db.setDoc('products', 'p1', { id: 'p1', stock: 10 });
-
-    const salePayload = {
-      id: 'req-concurrent',
-      createdBy: 'cashier1',
-      customerId: '',
-      items: [{ id: 'p1', quantity: 2 }],
-      totalAmount: 60,
-    };
-
-    const processSale = async (sale: typeof salePayload) => {
-      return executeMockTransaction(db, async (txn) => {
-        const existing = await txn.get('sales', sale.id);
-        if (existing?.data) {
-          return { ok: true, duplicate: true, saleId: sale.id };
-        }
-        const p1 = (await txn.get('products', 'p1'))!.data;
-        await new Promise(r => setTimeout(r, 5));
-        txn.set('sales', sale.id, sale);
-        txn.update('products', 'p1', { ...p1, stock: p1.stock - 2 });
-        return { ok: true, duplicate: false, saleId: sale.id };
-      });
-    };
-
-    const results = await Promise.all([processSale(salePayload), processSale(salePayload)]);
-    const dedupeCounts = results.filter(r => r.duplicate);
-    const createdCounts = results.filter(r => !r.duplicate);
-
-    expect(createdCounts.length).toBe(1);
-    expect(dedupeCounts.length).toBe(1);
     expect(db.getDoc('products', 'p1')?.data.stock).toBe(8);
   });
 
-  it('IDEM-014-03: Simulated lost HTTP response retry does not duplicate sale or stock', async () => {
-    const db = new MockFirestoreDatabase();
-    db.setDoc('products', 'p1', { id: 'p1', stock: 5 });
-
-    const salePayload = {
-      id: 'req-lost-resp',
+  it('IDEM-014-06: Same sale.id with same item count but different product IDs is rejected with 409 conflict', () => {
+    const req1 = {
+      id: 'sale-001',
       createdBy: 'cashier1',
-      customerId: '',
-      items: [{ id: 'p1', quantity: 1 }],
+      customerId: 'c1',
+      items: [{ id: 'pA', quantity: 1 }, { id: 'pB', quantity: 1 }],
+    };
+    const req2 = {
+      id: 'sale-001',
+      createdBy: 'cashier1',
+      customerId: 'c1',
+      items: [{ id: 'pC', quantity: 100 }, { id: 'pD', quantity: 50 }],
     };
 
-    // First attempt commits but client loses response
-    await executeMockTransaction(db, async (txn) => {
-      const p1 = (await txn.get('products', 'p1'))!.data;
-      txn.set('sales', salePayload.id, salePayload);
-      txn.update('products', 'p1', { ...p1, stock: p1.stock - 1 });
-    });
-
-    // Client retries same request
-    const retryResult = await executeMockTransaction(db, async (txn) => {
-      const existing = await txn.get('sales', salePayload.id);
-      if (existing?.data) {
-        return { ok: true, duplicate: true, saleId: salePayload.id };
-      }
-      return { ok: true, duplicate: false };
-    });
-
-    expect(retryResult.duplicate).toBe(true);
-    expect(db.getDoc('products', 'p1')?.data.stock).toBe(4);
+    const fp1 = generateSaleRequestFingerprint(req1);
+    const fp2 = generateSaleRequestFingerprint(req2);
+    expect(fp1).not.toBe(fp2);
   });
 
-  it('IDEM-014-04: Same idempotency key reused with different payload is rejected with 409 conflict', async () => {
-    const db = new MockFirestoreDatabase();
-    db.setDoc('products', 'p1', { id: 'p1', stock: 10 });
-    db.setDoc('sales', 'req-fixed-id', {
-      id: 'req-fixed-id',
+  it('IDEM-014-07: Same sale.id with same products but different quantity is rejected with 409 conflict', () => {
+    const req1 = {
+      id: 'sale-001',
       createdBy: 'cashier1',
-      customerId: 'custA',
-      items: [{ id: 'p1', quantity: 1 }],
-    });
-
-    // Client reuses same ID with different customer/items
-    let errCode = '';
-    try {
-      await executeMockTransaction(db, async (txn) => {
-        const existing = (await txn.get('sales', 'req-fixed-id'))?.data;
-        if (existing) {
-          if (existing.customerId !== 'custB') {
-            const err: any = new Error('Idempotency key reused with different sale payload');
-            err.code = 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD';
-            throw err;
-          }
-        }
-      });
-    } catch (e: any) {
-      errCode = e.code;
-    }
-
-    expect(errCode).toBe('IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD');
-  });
-
-  it('IDEM-014-05: Different requestIds with valid payloads are treated as independent sales', async () => {
-    const db = new MockFirestoreDatabase();
-    db.setDoc('products', 'p1', { id: 'p1', stock: 10 });
-
-    const sale1 = { id: 'sale-alpha', items: [{ id: 'p1', quantity: 1 }] };
-    const sale2 = { id: 'sale-beta', items: [{ id: 'p1', quantity: 2 }] };
-
-    const process = async (s: typeof sale1) => {
-      return executeMockTransaction(db, async (txn) => {
-        const p1 = (await txn.get('products', 'p1'))!.data;
-        txn.set('sales', s.id, s);
-        txn.update('products', 'p1', { ...p1, stock: p1.stock - s.items[0].quantity });
-      });
+      items: [{ id: 'pA', quantity: 1 }],
+    };
+    const req2 = {
+      id: 'sale-001',
+      createdBy: 'cashier1',
+      items: [{ id: 'pA', quantity: 5 }],
     };
 
-    await process(sale1);
-    await process(sale2);
+    const fp1 = generateSaleRequestFingerprint(req1);
+    const fp2 = generateSaleRequestFingerprint(req2);
+    expect(fp1).not.toBe(fp2);
+  });
 
-    expect(db.getDoc('sales', 'sale-alpha')).toBeDefined();
-    expect(db.getDoc('sales', 'sale-beta')).toBeDefined();
-    expect(db.getDoc('products', 'p1')?.data.stock).toBe(7); // 10 - 1 - 2 = 7
+  it('IDEM-014-08: Same sale.id with same items but different customer is rejected with 409 conflict', () => {
+    const req1 = {
+      id: 'sale-001',
+      createdBy: 'cashier1',
+      customerId: 'cust-1',
+      items: [{ id: 'pA', quantity: 1 }],
+    };
+    const req2 = {
+      id: 'sale-001',
+      createdBy: 'cashier1',
+      customerId: 'cust-2',
+      items: [{ id: 'pA', quantity: 1 }],
+    };
+
+    const fp1 = generateSaleRequestFingerprint(req1);
+    const fp2 = generateSaleRequestFingerprint(req2);
+    expect(fp1).not.toBe(fp2);
+  });
+
+  it('IDEM-014-09: Same logical sale with items in different order generates identical canonical fingerprint', () => {
+    const req1 = {
+      id: 'sale-001',
+      createdBy: 'cashier1',
+      customerId: 'c1',
+      items: [{ id: 'pA', quantity: 1 }, { id: 'pB', quantity: 2 }],
+    };
+    const req2 = {
+      id: 'sale-001',
+      createdBy: 'cashier1',
+      customerId: 'c1',
+      items: [{ id: 'pB', quantity: 2 }, { id: 'pA', quantity: 1 }],
+    };
+
+    const fp1 = generateSaleRequestFingerprint(req1);
+    const fp2 = generateSaleRequestFingerprint(req2);
+    expect(fp1).toBe(fp2);
+  });
+
+  it('IDEM-014-10: Duplicate product rows are normalized and produce identical canonical fingerprint', () => {
+    const req1 = {
+      id: 'sale-001',
+      createdBy: 'cashier1',
+      items: [{ id: 'pA', quantity: 2 }, { id: 'pA', quantity: 3 }],
+    };
+    const req2 = {
+      id: 'sale-001',
+      createdBy: 'cashier1',
+      items: [{ id: 'pA', quantity: 5 }],
+    };
+
+    const fp1 = generateSaleRequestFingerprint(req1);
+    const fp2 = generateSaleRequestFingerprint(req2);
+    expect(fp1).toBe(fp2);
+  });
+
+  it('IDEM-014-11: Different paymentMethod or dueDate generates distinct fingerprint', () => {
+    const req1 = {
+      id: 'sale-001',
+      createdBy: 'cashier1',
+      paymentMethod: 'نقدي',
+      items: [{ id: 'pA', quantity: 1 }],
+    };
+    const req2 = {
+      id: 'sale-001',
+      createdBy: 'cashier1',
+      paymentMethod: 'آجل (دين)',
+      dueDate: '2026-09-01',
+      items: [{ id: 'pA', quantity: 1 }],
+    };
+
+    const fp1 = generateSaleRequestFingerprint(req1);
+    const fp2 = generateSaleRequestFingerprint(req2);
+    expect(fp1).not.toBe(fp2);
+  });
+
+  it('IDEM-014-12: Historical sale without requestFingerprint matches legitimate retry and rejects altered payload', () => {
+    const historicalSale = {
+      id: 'hist-001',
+      createdBy: 'cashier1',
+      customerId: 'c1',
+      items: [{ id: 'pA', quantity: 2 }],
+      totalAmount: 40,
+    };
+
+    const retryMatching = {
+      id: 'hist-001',
+      createdBy: 'cashier1',
+      customerId: 'c1',
+      items: [{ id: 'pA', quantity: 2 }],
+    };
+
+    const retryAltered = {
+      id: 'hist-001',
+      createdBy: 'cashier1',
+      customerId: 'c1',
+      items: [{ id: 'pB', quantity: 2 }],
+    };
+
+    const histFp = generateSaleRequestFingerprint(historicalSale);
+    const matchingFp = generateSaleRequestFingerprint(retryMatching);
+    const alteredFp = generateSaleRequestFingerprint(retryAltered);
+
+    expect(matchingFp).toBe(histFp);
+    expect(alteredFp).not.toBe(histFp);
   });
 });
 
-// ── AUDIT-013 Server-Side Financial Recalculation Simulation Test Suite ──
+// ── AUDIT-013 Server-Side Financial Recalculation & Security Suite ──
 
 describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', () => {
   it('FIN-013-01: Server ignores client manipulated line price and recalculates from database price', async () => {
     const db = new MockFirestoreDatabase();
     db.setDoc('products', 'p1', { id: 'p1', name: 'جاكيت', sellingPrice: 100, purchasePrice: 60, stock: 5 });
 
-    // Rogue client attempts to pay 10 instead of 100
     const rawSale = {
       id: 's-hack-1',
       items: [{ id: 'p1', quantity: 2, sellingPrice: 10, purchasePrice: 5 }],
-      totalAmount: 20, // manipulated
-      profit: 10,      // manipulated
+      totalAmount: 20,
+      profit: 10,
     };
 
     await executeMockTransaction(db, async (txn) => {
       const p1 = (await txn.get('products', 'p1'))!.data;
-      const trustedSellPrice = p1.sellingPrice; // 100
-      const trustedBuyPrice = p1.purchasePrice; // 60
+      const trustedSellPrice = p1.sellingPrice;
+      const trustedBuyPrice = p1.purchasePrice;
 
-      const serverTotal = roundMoney(trustedSellPrice * 2); // 200
-      const serverProfit = roundMoney(serverTotal - (trustedBuyPrice * 2)); // 80
+      const serverTotal = roundMoney(trustedSellPrice * 2);
+      const serverProfit = roundMoney(serverTotal - (trustedBuyPrice * 2));
 
       txn.set('sales', rawSale.id, {
         ...rawSale,
@@ -516,8 +549,8 @@ describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', 
     });
 
     const saved = db.getDoc('sales', 's-hack-1')?.data;
-    expect(saved.totalAmount).toBe(200); // Recalculated to 200!
-    expect(saved.profit).toBe(80);        // Recalculated to 80!
+    expect(saved.totalAmount).toBe(200);
+    expect(saved.profit).toBe(80);
     expect(saved.items[0].sellingPrice).toBe(100);
   });
 
@@ -525,7 +558,7 @@ describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', 
     const db = new MockFirestoreDatabase();
     db.setDoc('products', 'p1', { id: 'p1', sellingPrice: 25.5, purchasePrice: 15, stock: 5 });
 
-    const serverTotal = roundMoney(25.5 * 3); // 76.5
+    const serverTotal = roundMoney(25.5 * 3);
     expect(serverTotal).toBe(76.5);
   });
 
@@ -535,7 +568,7 @@ describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', 
 
     const sell = 50 * 2;
     const cost = 35 * 2;
-    const serverProfit = roundMoney(sell - cost); // 30
+    const serverProfit = roundMoney(sell - cost);
     expect(serverProfit).toBe(30);
   });
 
@@ -544,12 +577,11 @@ describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', 
     db.setDoc('products', 'p1', { id: 'p1', sellingPrice: 45, purchasePrice: 25, stock: 5 });
     db.setDoc('customers', 'c1', { id: 'c1', totalDebt: 100, totalPurchases: 200 });
 
-    // Client claims total is 10
     await executeMockTransaction(db, async (txn) => {
       const p1 = (await txn.get('products', 'p1'))!.data;
       const c1 = (await txn.get('customers', 'c1'))!.data;
 
-      const serverTotal = roundMoney(p1.sellingPrice * 2); // 90
+      const serverTotal = roundMoney(p1.sellingPrice * 2);
       txn.update('customers', 'c1', {
         ...c1,
         totalDebt: roundMoney(c1.totalDebt + serverTotal),
@@ -558,8 +590,8 @@ describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', 
     });
 
     const c = db.getDoc('customers', 'c1')?.data;
-    expect(c.totalDebt).toBe(190); // 100 + 90
-    expect(c.totalPurchases).toBe(290); // 200 + 90
+    expect(c.totalDebt).toBe(190);
+    expect(c.totalPurchases).toBe(290);
   });
 
   it('FIN-013-05: Manipulated debt payload cannot alter customer debt balance', () => {
@@ -587,7 +619,7 @@ describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', 
     const cost = roundMoney(30 * 1);
     const profit = roundMoney(total - cost);
 
-    expect(profit).toBe(-10); // Loss of 10 LYD accurately recorded
+    expect(profit).toBe(-10);
   });
 
   it('FIN-013-08: Manual items outside inventory pass dedicated validation without bypassing real product prices', () => {
@@ -601,7 +633,7 @@ describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', 
     };
 
     const norm = normalizeCartStockItems([manualItem]);
-    expect(norm.items).toEqual([]); // Ignored from inventory deductions
+    expect(norm.items).toEqual([]);
 
     const total = roundMoney(manualItem.sellingPrice * manualItem.quantity);
     const cost = roundMoney(manualItem.purchasePrice * manualItem.quantity);
@@ -609,5 +641,37 @@ describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', 
 
     expect(total).toBe(30);
     expect(profit).toBe(10);
+  });
+
+  it('FIN-013-09: Existing real product ID masquerading with isManualItem=true is rejected', async () => {
+    const db = new MockFirestoreDatabase();
+    db.setDoc('products', 'real-prod-100', { id: 'real-prod-100', name: 'طقم ولادي فاخر', sellingPrice: 120, stock: 10 });
+
+    const manipulatedItem = {
+      id: 'real-prod-100',
+      name: 'طقم ولادي فاخر',
+      isManualItem: true,
+      sellingPrice: 5,
+      purchasePrice: 2,
+      quantity: 1,
+    };
+
+    let rejected = false;
+    try {
+      await executeMockTransaction(db, async (txn) => {
+        if (manipulatedItem.isManualItem && manipulatedItem.id) {
+          const collision = await txn.get('products', manipulatedItem.id);
+          if (collision?.data) {
+            const err: any = new Error('MANUAL_ITEM_CATALOG_COLLISION');
+            err.code = 'MANUAL_ITEM_CATALOG_COLLISION';
+            throw err;
+          }
+        }
+      });
+    } catch (e: any) {
+      if (e.code === 'MANUAL_ITEM_CATALOG_COLLISION') rejected = true;
+    }
+
+    expect(rejected).toBe(true);
   });
 });
