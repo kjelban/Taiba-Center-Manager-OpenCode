@@ -15,6 +15,10 @@ export function isValidDocumentId(id: string): boolean {
   return typeof id === 'string' && id.length > 0 && id.length <= 128 && /^[a-zA-Z0-9_\-]+$/.test(id);
 }
 
+export function roundMoney(amount: number): number {
+  return Math.round(amount * 1000) / 1000;
+}
+
 // Server-side permission mapping (mirrors Firestore rules)
 // Maps collection name to the permission required for WRITE operations.
 // 'admin' = requires 'employees' or 'settings' permission
@@ -99,6 +103,25 @@ export function validateSalePayload(sale: any): string | null {
   if (!sale.createdBy || typeof sale.createdBy !== 'string') return 'Missing or invalid createdBy';
   if (typeof sale.isPaid !== 'boolean') return 'Missing or invalid isPaid';
   if (sale.customerId && !isValidDocumentId(sale.customerId)) return 'Invalid customerId format';
+
+  // Validate individual item structures
+  for (const item of sale.items) {
+    if (!item || typeof item !== 'object') return 'Invalid cart item structure';
+    if (!item.id || typeof item.id !== 'string') return 'Missing item id';
+    if (typeof item.quantity !== 'number' || !Number.isInteger(item.quantity) || item.quantity <= 0) {
+      return `Invalid item quantity for ${item.id}`;
+    }
+    if (item.isManualItem) {
+      if (!item.name || typeof item.name !== 'string') return 'Missing name for manual item';
+      if (typeof item.sellingPrice !== 'number' || !Number.isFinite(item.sellingPrice) || item.sellingPrice <= 0) {
+        return 'Invalid sellingPrice for manual item';
+      }
+      if (typeof item.purchasePrice !== 'number' || !Number.isFinite(item.purchasePrice) || item.purchasePrice < 0) {
+        return 'Invalid purchasePrice for manual item';
+      }
+    }
+  }
+
   return null;
 }
 
