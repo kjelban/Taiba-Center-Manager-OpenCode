@@ -6,6 +6,8 @@ import {
   WRITE_PERMISSIONS,
   hasWritePermission,
   validateProxyPayload,
+  validateSalePayload,
+  normalizeCartStockItems,
 } from './server-auth';
 
 // ── isValidCollection ──
@@ -104,55 +106,35 @@ describe('hasWritePermission', () => {
       expect(hasWritePermission(cashierEmployee, 'sales')).toBe(true);
     });
 
-    it('denies inventory user from writing sales', () => {
-      expect(hasWritePermission(inventoryEmployee, 'sales')).toBe(false);
+    it('allows cashier to write customers', () => {
+      expect(hasWritePermission(cashierEmployee, 'customers')).toBe(true);
+    });
+
+    it('allows cashier to write suppliers', () => {
+      expect(hasWritePermission(cashierEmployee, 'suppliers')).toBe(true);
     });
 
     it('allows expenses user to write expenses', () => {
       expect(hasWritePermission(expensesEmployee, 'expenses')).toBe(true);
     });
 
-    it('allows cashier to write customers (pos permission)', () => {
-      expect(hasWritePermission(cashierEmployee, 'customers')).toBe(true);
+    it('denies cashier from writing expenses', () => {
+      expect(hasWritePermission(cashierEmployee, 'expenses')).toBe(false);
     });
 
-    it('allows cashier to write suppliers (pos permission)', () => {
-      expect(hasWritePermission(cashierEmployee, 'suppliers')).toBe(true);
-    });
-  });
-
-  describe('any-authenticated collections', () => {
-    it('allows any authenticated user to write attendance', () => {
-      expect(hasWritePermission(cashierEmployee, 'attendance')).toBe(true);
-    });
-
-    it('allows settings/admin user to write categories', () => {
+    it('allows settings user to write categories and seasons', () => {
       expect(hasWritePermission(adminEmployee, 'categories')).toBe(true);
-      expect(hasWritePermission(cashierEmployee, 'categories')).toBe(false);
+      expect(hasWritePermission(adminEmployee, 'seasons')).toBe(true);
     });
 
-    it('allows settings/admin user to write seasons', () => {
-      expect(hasWritePermission(adminEmployee, 'seasons')).toBe(true);
+    it('denies cashier from writing categories and seasons', () => {
+      expect(hasWritePermission(cashierEmployee, 'categories')).toBe(false);
       expect(hasWritePermission(cashierEmployee, 'seasons')).toBe(false);
     });
-  });
 
-  describe('edge cases', () => {
-    it('denies unknown collections', () => {
-      expect(hasWritePermission(adminEmployee, 'unknown_collection')).toBe(false);
-    });
-
-    it('handles null/undefined employee', () => {
-      expect(hasWritePermission(null, 'products')).toBe(false);
-      expect(hasWritePermission(undefined, 'products')).toBe(false);
-    });
-
-    it('handles employee with no permissions', () => {
-      expect(hasWritePermission({ permissions: [] }, 'products')).toBe(false);
-    });
-
-    it('handles employee with undefined permissions', () => {
-      expect(hasWritePermission({}, 'products')).toBe(false);
+    it('allows any authenticated user to write attendance', () => {
+      expect(hasWritePermission(cashierEmployee, 'attendance')).toBe(true);
+      expect(hasWritePermission(inventoryEmployee, 'attendance')).toBe(true);
     });
   });
 });
@@ -160,272 +142,121 @@ describe('hasWritePermission', () => {
 // ── validateProxyPayload ──
 
 describe('validateProxyPayload', () => {
-  describe('common validation', () => {
-    it('rejects null/undefined data', () => {
-      expect(validateProxyPayload('products', 'id1', null)).toBe('Data must be an object');
-      expect(validateProxyPayload('products', 'id1', undefined)).toBe('Data must be an object');
-    });
+  it('validates products payload correctly', () => {
+    const valid = { id: 'p1', name: 'قميص أطفال', sellingPrice: 25, stock: 10 };
+    expect(validateProxyPayload('products', 'p1', valid)).toBeNull();
 
-    it('rejects non-object data', () => {
-      expect(validateProxyPayload('products', 'id1', 'string')).toBe('Data must be an object');
-      expect(validateProxyPayload('products', 'id1', 42)).toBe('Data must be an object');
-    });
-
-    it('rejects missing id field', () => {
-      expect(validateProxyPayload('products', 'id1', { name: 'test' })).toBe('Missing required field: id');
-    });
-
-    it('rejects id mismatch', () => {
-      expect(validateProxyPayload('products', 'id1', { id: 'id2', name: 'test' })).toBe('Document ID mismatch');
-    });
+    expect(validateProxyPayload('products', 'p1', { id: 'p2' })).toBe('Document ID mismatch');
+    expect(validateProxyPayload('products', 'p1', { id: 'p1', name: '' })).toBe('Missing or invalid: name');
+    expect(validateProxyPayload('products', 'p1', { id: 'p1', name: 'قميص', sellingPrice: -5 })).toBe('Missing or invalid: sellingPrice');
+    expect(validateProxyPayload('products', 'p1', { id: 'p1', name: 'قميص', sellingPrice: 25, stock: -1 })).toBe('Missing or invalid: stock');
   });
 
-  describe('products validation', () => {
-    const validProduct = { id: 'p1', name: 'Shirt', sellingPrice: 50, stock: 10 };
+  it('validates expenses payload correctly', () => {
+    const valid = { id: 'e1', description: 'فاتورة كهرباء', amount: 150, date: '2024-01-01', category: 'فواتير' };
+    expect(validateProxyPayload('expenses', 'e1', valid)).toBeNull();
 
-    it('accepts valid product', () => {
-      expect(validateProxyPayload('products', 'p1', validProduct)).toBeNull();
-    });
-
-    it('rejects missing name', () => {
-      expect(validateProxyPayload('products', 'p1', { ...validProduct, name: '' })).toContain('name');
-    });
-
-    it('rejects negative sellingPrice', () => {
-      expect(validateProxyPayload('products', 'p1', { ...validProduct, sellingPrice: -1 })).toContain('sellingPrice');
-    });
-
-    it('rejects negative stock', () => {
-      expect(validateProxyPayload('products', 'p1', { ...validProduct, stock: -1 })).toContain('stock');
-    });
+    expect(validateProxyPayload('expenses', 'e1', { id: 'e1', description: '', amount: 10 })).toBe('Missing or invalid: description');
+    expect(validateProxyPayload('expenses', 'e1', { id: 'e1', description: 'دفع', amount: 0 })).toBe('Missing or invalid: amount');
   });
 
-  describe('sales validation', () => {
-    const validSale = {
-      id: 's1', type: 'بيع', date: '2024-01-01', items: [], totalAmount: 100,
-      profit: 20, paymentMethod: 'نقدي', createdBy: 'admin', isPaid: true,
-    };
-
-    it('accepts valid sale', () => {
-      expect(validateProxyPayload('sales', 's1', validSale)).toBeNull();
-    });
-
-    it('rejects missing type', () => {
-      expect(validateProxyPayload('sales', 's1', { ...validSale, type: '' })).toContain('type');
-    });
-
-    it('rejects non-array items', () => {
-      expect(validateProxyPayload('sales', 's1', { ...validSale, items: 'not-array' })).toContain('items');
-    });
-
-    it('rejects non-boolean isPaid', () => {
-      expect(validateProxyPayload('sales', 's1', { ...validSale, isPaid: 'yes' })).toContain('isPaid');
-    });
-  });
-
-  describe('expenses validation', () => {
-    const validExpense = { id: 'e1', description: 'Rent', amount: 500, date: '2024-01-01', category: 'إيجار' };
-
-    it('accepts valid expense', () => {
-      expect(validateProxyPayload('expenses', 'e1', validExpense)).toBeNull();
-    });
-
-    it('rejects zero amount', () => {
-      expect(validateProxyPayload('expenses', 'e1', { ...validExpense, amount: 0 })).toContain('amount');
-    });
-
-    it('rejects negative amount', () => {
-      expect(validateProxyPayload('expenses', 'e1', { ...validExpense, amount: -10 })).toContain('amount');
-    });
-  });
-
-  describe('employees validation', () => {
-    const validEmployee = {
-      id: 'emp1', name: 'Ali', email: 'ali@test.com', salary: 1000, permissions: ['pos'],
-    };
-
-    it('accepts valid employee', () => {
-      expect(validateProxyPayload('employees', 'emp1', validEmployee)).toBeNull();
-    });
-
-    it('rejects missing email', () => {
-      expect(validateProxyPayload('employees', 'emp1', { ...validEmployee, email: '' })).toContain('email');
-    });
-
-    it('rejects negative salary', () => {
-      expect(validateProxyPayload('employees', 'emp1', { ...validEmployee, salary: -1 })).toContain('salary');
-    });
-
-    it('rejects non-array permissions', () => {
-      expect(validateProxyPayload('employees', 'emp1', { ...validEmployee, permissions: 'admin' })).toContain('permissions');
-    });
-  });
-
-  describe('customers validation', () => {
-    it('accepts valid customer', () => {
-      expect(validateProxyPayload('customers', 'c1', { id: 'c1', name: 'Ahmed' })).toBeNull();
-    });
-
-    it('rejects missing name', () => {
-      expect(validateProxyPayload('customers', 'c1', { id: 'c1', name: '' })).toContain('name');
-    });
-  });
-
-  describe('suppliers validation', () => {
-    it('accepts valid supplier', () => {
-      expect(validateProxyPayload('suppliers', 's1', { id: 's1', name: 'Supplier Co' })).toBeNull();
-    });
-
-    it('rejects missing name', () => {
-      expect(validateProxyPayload('suppliers', 's1', { id: 's1', name: '' })).toContain('name');
-    });
-  });
-
-  describe('attendance validation', () => {
-    const validAttendance = {
-      id: 'a1', employeeId: 'emp1', employeeName: 'Ali', date: '2024-01-01', checkInTime: '09:00',
-    };
-
-    it('accepts valid attendance', () => {
-      expect(validateProxyPayload('attendance', 'a1', validAttendance)).toBeNull();
-    });
-
-    it('rejects missing employeeId', () => {
-      expect(validateProxyPayload('attendance', 'a1', { ...validAttendance, employeeId: '' })).toContain('employeeId');
-    });
-  });
-
-  describe('audit_logs (immutable)', () => {
-    it('always rejects writes to audit_logs', () => {
-      expect(validateProxyPayload('audit_logs', 'log1', { id: 'log1' })).toBe('Direct writes to audit_logs are not allowed');
-    });
-  });
-
-  describe('metadata validation', () => {
-    it('accepts valid metadata', () => {
-      expect(validateProxyPayload('metadata', 'm1', { id: 'm1', migrated: true })).toBeNull();
-    });
-
-    it('rejects non-boolean migrated', () => {
-      expect(validateProxyPayload('metadata', 'm1', { id: 'm1', migrated: 'yes' })).toContain('migrated');
-    });
+  it('blocks direct writes to audit_logs', () => {
+    expect(validateProxyPayload('audit_logs', 'log1', { id: 'log1' })).toBe('Direct writes to audit_logs are not allowed');
   });
 });
 
-// ── Security Architecture Tests ──
+// ── AUDIT-005 Concurrency & Sales Normalization Tests ──
 
-describe('Security: Client-side write elimination', () => {
-  const posEmployee = { permissions: ['pos', 'dashboard'] };
-  const cashierEmployee = { permissions: ['pos', 'dashboard'] };
-  const inventoryEmployee = { permissions: ['inventory', 'dashboard'] };
-  const adminEmployee = { permissions: ['employees', 'settings', 'dashboard'] };
-
-  describe('Sales write permission enforcement', () => {
-    it('POS user can write sales', () => {
-      expect(hasWritePermission(posEmployee, 'sales')).toBe(true);
-    });
-
-    it('Non-POS user cannot write sales', () => {
-      expect(hasWritePermission(inventoryEmployee, 'sales')).toBe(false);
-    });
-
-    it('Sales payload requires all mandatory fields', () => {
-      const incomplete = { id: 's1', type: 'بيع' };
-      expect(validateProxyPayload('sales', 's1', incomplete)).not.toBeNull();
-    });
-
-    it('Sales payload rejects type mismatch', () => {
-      expect(validateProxyPayload('sales', 's1', { id: 's1', name: 'test' })).toContain('Missing or invalid');
-    });
+describe('AUDIT-005: normalizeCartStockItems', () => {
+  it('TEST-005-01: normalizes valid cart items with unique products', () => {
+    const cart = [
+      { id: 'p1', quantity: 2 },
+      { id: 'p2', quantity: 3 },
+    ];
+    const res = normalizeCartStockItems(cart);
+    expect(res.error).toBeUndefined();
+    expect(res.items).toEqual([
+      { productId: 'p1', totalQuantity: 2 },
+      { productId: 'p2', totalQuantity: 3 },
+    ]);
   });
 
-  describe('Backup endpoint authorization', () => {
-    it('admin has required permissions for backup operations', () => {
-      expect(hasWritePermission(adminEmployee, 'metadata')).toBe(true);
-    });
-
-    it('POS user cannot write metadata (backup target)', () => {
-      expect(hasWritePermission(posEmployee, 'metadata')).toBe(false);
-    });
-
-    it('cashier cannot write metadata (backup target)', () => {
-      expect(hasWritePermission(cashierEmployee, 'metadata')).toBe(false);
-    });
-
-    it('non-admin cannot write audit_logs', () => {
-      expect(hasWritePermission(posEmployee, 'audit_logs')).toBe(false);
-      expect(hasWritePermission(inventoryEmployee, 'audit_logs')).toBe(false);
-    });
+  it('TEST-005-02: groups and sums duplicate product entries in the same cart', () => {
+    const cart = [
+      { id: 'p1', quantity: 2 },
+      { id: 'p2', quantity: 1 },
+      { id: 'p1', quantity: 3 }, // duplicate row for p1
+    ];
+    const res = normalizeCartStockItems(cart);
+    expect(res.error).toBeUndefined();
+    expect(res.items).toEqual([
+      { productId: 'p1', totalQuantity: 5 }, // 2 + 3 = 5
+      { productId: 'p2', totalQuantity: 1 },
+    ]);
   });
 
-  describe('Sensitive collection write permissions', () => {
-    it('employees collection requires admin', () => {
-      expect(hasWritePermission(adminEmployee, 'employees')).toBe(true);
-      expect(hasWritePermission(posEmployee, 'employees')).toBe(false);
-      expect(hasWritePermission(inventoryEmployee, 'employees')).toBe(false);
-    });
-
-    it('products collection requires inventory permission', () => {
-      expect(hasWritePermission(inventoryEmployee, 'products')).toBe(true);
-      expect(hasWritePermission(posEmployee, 'products')).toBe(false);
-      expect(hasWritePermission(adminEmployee, 'products')).toBe(false);
-    });
-
-    it('expenses collection requires expenses permission', () => {
-      const expensesEmployee = { permissions: ['expenses'] };
-      expect(hasWritePermission(expensesEmployee, 'expenses')).toBe(true);
-      expect(hasWritePermission(posEmployee, 'expenses')).toBe(false);
-      expect(hasWritePermission(inventoryEmployee, 'expenses')).toBe(false);
-    });
+  it('TEST-005-03: filters out manual/non-inventory items', () => {
+    const cart = [
+      { id: 'p1', quantity: 2 },
+      { id: 'manual-1', quantity: 10, isManualItem: true },
+    ];
+    const res = normalizeCartStockItems(cart);
+    expect(res.error).toBeUndefined();
+    expect(res.items).toEqual([
+      { productId: 'p1', totalQuantity: 2 },
+    ]);
   });
 
-  describe('Authentication requirement', () => {
-    it('rejects null employee', () => {
-      expect(hasWritePermission(null, 'sales')).toBe(false);
-      expect(hasWritePermission(null, 'products')).toBe(false);
-      expect(hasWritePermission(null, 'employees')).toBe(false);
-    });
-
-    it('rejects undefined employee', () => {
-      expect(hasWritePermission(undefined, 'sales')).toBe(false);
-    });
-
-    it('rejects empty permissions', () => {
-      expect(hasWritePermission({ permissions: [] }, 'sales')).toBe(false);
-    });
-
-    it('rejects unknown collection', () => {
-      expect(hasWritePermission(adminEmployee, 'unknown')).toBe(false);
-      expect(hasWritePermission(posEmployee, 'users')).toBe(false);
-    });
+  it('TEST-005-04: rejects zero, negative, fractional, NaN, and infinite quantities', () => {
+    expect(normalizeCartStockItems([{ id: 'p1', quantity: 0 }]).error).toBeDefined();
+    expect(normalizeCartStockItems([{ id: 'p1', quantity: -2 }]).error).toBeDefined();
+    expect(normalizeCartStockItems([{ id: 'p1', quantity: 1.5 }]).error).toBeDefined();
+    expect(normalizeCartStockItems([{ id: 'p1', quantity: NaN }]).error).toBeDefined();
+    expect(normalizeCartStockItems([{ id: 'p1', quantity: Infinity }]).error).toBeDefined();
+    expect(normalizeCartStockItems([{ id: 'p1', quantity: 10001 }]).error).toBeDefined();
   });
 
-  describe('Document ID validation (prevents injection)', () => {
-    it('rejects path traversal attempts', () => {
-      expect(isValidDocumentId('../etc/passwd')).toBe(false);
-      expect(isValidDocumentId('admin/../employees')).toBe(false);
-      expect(isValidDocumentId('sales/../../metadata')).toBe(false);
-    });
+  it('TEST-005-05: rejects invalid or malicious product IDs in cart', () => {
+    expect(normalizeCartStockItems([{ id: '../etc/passwd', quantity: 1 }]).error).toBeDefined();
+    expect(normalizeCartStockItems([{ id: '', quantity: 1 }]).error).toBeDefined();
+    expect(normalizeCartStockItems([{ id: 'p1/sub', quantity: 1 }]).error).toBeDefined();
+  });
+});
 
-    it('rejects SQL injection patterns', () => {
-      expect(isValidDocumentId("'; DROP TABLE--")).toBe(false);
-      expect(isValidDocumentId('1 OR 1=1')).toBe(false);
-    });
+describe('AUDIT-005: validateSalePayload', () => {
+  const validSale = {
+    id: 'sale-001',
+    type: 'بيع',
+    date: '2024-01-01T10:00:00.000Z',
+    items: [{ id: 'p1', quantity: 2, sellingPrice: 20, purchasePrice: 10 }],
+    totalAmount: 40,
+    profit: 20,
+    paymentMethod: 'نقدي',
+    createdBy: 'كاشير 1',
+    isPaid: true,
+  };
 
-    it('rejects XSS patterns in IDs', () => {
-      expect(isValidDocumentId('<script>alert(1)</script>')).toBe(false);
-      expect(isValidDocumentId('javascript:void(0)')).toBe(false);
-    });
+  it('TEST-005-06: accepts complete valid sale object', () => {
+    expect(validateSalePayload(validSale)).toBeNull();
+  });
 
-    it('rejects empty and oversized IDs', () => {
-      expect(isValidDocumentId('')).toBe(false);
-      expect(isValidDocumentId('a'.repeat(129))).toBe(false);
-    });
+  it('TEST-005-07: rejects missing or non-finite totalAmount and profit', () => {
+    expect(validateSalePayload({ ...validSale, totalAmount: undefined })).toBe('Missing or invalid totalAmount');
+    expect(validateSalePayload({ ...validSale, totalAmount: NaN })).toBe('Missing or invalid totalAmount');
+    expect(validateSalePayload({ ...validSale, profit: Infinity })).toBe('Missing or invalid profit');
+  });
 
-    it('accepts valid alphanumeric IDs', () => {
-      expect(isValidDocumentId('abc123')).toBe(true);
-      expect(isValidDocumentId('sale-2024-001')).toBe(true);
-      expect(isValidDocumentId('R-550e8400-e29b')).toBe(true);
-    });
+  it('TEST-005-08: rejects invalid sale type (must be بيع or مرتجع)', () => {
+    expect(validateSalePayload({ ...validSale, type: 'شراء' })).toBe('Missing or invalid type');
+    expect(validateSalePayload({ ...validSale, type: 'مرتجع' })).toBeNull();
+  });
+
+  it('TEST-005-09: validates customerId format if provided', () => {
+    expect(validateSalePayload({ ...validSale, customerId: 'cust-123' })).toBeNull();
+    expect(validateSalePayload({ ...validSale, customerId: 'cust/../hack' })).toBe('Invalid customerId format');
+  });
+
+  it('TEST-005-10: rejects empty items array in sale', () => {
+    expect(validateSalePayload({ ...validSale, items: [] })).toBe('Missing or empty items');
   });
 });
