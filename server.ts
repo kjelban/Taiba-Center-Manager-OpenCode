@@ -14,6 +14,7 @@ import {
   validateProxyPayload,
   validateSalePayload,
   normalizeCartStockItems,
+  roundMoney,
 } from './server-auth';
 
 declare global {
@@ -27,42 +28,120 @@ declare global {
 
 // ---- Cryptographic Password Helpers ----
 
-export function hashPassword(password: string): string {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `scrypt$${salt}$${hash}`;
+function hashPassword(password: string, salt?: string): string {
+  const s = salt || crypto.randomBytes(16).toString('hex');
+  const hash = crypto.pbkdf2Sync(password, s, 100000, 64, 'sha512').toString('hex');
+  return `pbkdf2:sha512:100000:${s}:${hash}`;
 }
 
-export function verifyPassword(password: string, storedHash: string): boolean {
-  if (!storedHash || typeof storedHash !== 'string') return false;
-  if (storedHash.startsWith('scrypt$')) {
-    const parts = storedHash.split('$');
-    if (parts.length !== 3) return false;
-    const [, salt, hash] = parts;
-    const computedHash = crypto.scryptSync(password, salt, 64).toString('hex');
-    try {
-      return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(computedHash, 'hex'));
-    } catch {
-      return false;
-    }
+function verifyPassword(password: string, storedHash: string): boolean {
+  if (!storedHash) return false;
+  if (!storedHash.startsWith('pbkdf2:')) {
+    return password === storedHash;
   }
-  // Legacy sha256 fallback compatibility
-  const legacyHash = crypto.createHash('sha256').update(password).digest('hex');
-  return storedHash === legacyHash;
+  const parts = storedHash.split(':');
+  if (parts.length !== 5) return false;
+  const iterations = parseInt(parts[2], 10);
+  const salt = parts[3];
+  const originalHash = parts[4];
+  const hash = crypto.pbkdf2Sync(password, salt, iterations, 64, 'sha512').toString('hex');
+  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(originalHash, 'hex'));
 }
 
-// ---- Firestore REST API proxy (bypasses restrictive security rules) ----
-const FIRESTORE_DB_PATH = "projects/adroit-weaver-v6tp2/databases/ai-studio-taibacentermanag-c767774a-873a-4b8d-81a6-1c3761dba0ea";
+function isLegacyPassword(storedHash: string): boolean {
+  return !storedHash || !storedHash.startsWith('pbkdf2:');
+}
+
+// ---- Google Service Account Auth for Firestore REST API ----
+
+let cachedGoogleToken: { token: string; expiresAt: number } | null = null;
+
+function getServiceAccountCredentials(): { client_email: string; private_key: string; project_id: string } | null {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+    try {
+      const parsed = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+      if (parsed.client_email && parsed.private_key) return parsed;
+    } catch {}
+  }
+  if (process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+    return {
+      client_email: process.env.FIREBASE_CLIENT_EMAIL,
+      private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      project_id: process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || 'taiba-center-manager',
+    };
+  }
+  return null;
+}
+
+async function getGoogleAccessToken(): Promise<string> {
+  if (cachedGoogleToken && cachedGoogleToken.expiresAt > Date.now() + 60000) {
+    return cachedGoogleToken.token;
+  }
+
+  const creds = getServiceAccountCredentials();
+  if (!creds) {
+    throw new Error(
+      "Missing service account credentials. Set FIREBASE_SERVICE_ACCOUNT_KEY or FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY."
+    );
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: "RS256", typ: "JWT" };
+  const claimSet = {
+    iss: creds.client_email,
+    scope: "https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/identitytoolkit",
+    aud: "https://oauth2.googleapis.com/token",
+    exp: now + 3600,
+    iat: now,
+  };
+
+  const b64Url = (obj: any) => Buffer.from(JSON.stringify(obj)).toString("base64url");
+  const unsignedToken = `${b64Url(header)}.${b64Url(claimSet)}`;
+
+  const signer = crypto.createSign("RSA-SHA256");
+  signer.update(unsignedToken);
+  const signature = signer.sign(creds.private_key, "base64url");
+  const jwt = `${unsignedToken}.${signature}`;
+
+  const resp = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
+    }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Failed to get Google OAuth token: ${resp.status} ${text}`);
+  }
+
+  const data = await resp.json() as any;
+  cachedGoogleToken = {
+    token: data.access_token,
+    expiresAt: Date.now() + (data.expires_in || 3600) * 1000,
+  };
+  return cachedGoogleToken.token;
+}
+
+// ---- Firestore REST Helpers ----
+
+const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || 'taiba-center-manager';
+const FIRESTORE_DB_PATH = `projects/${PROJECT_ID}/databases/(default)`;
 
 function jsToFirestoreValue(val: any): any {
   if (val === null || val === undefined) return { nullValue: null };
-  const t = typeof val;
-  if (t === "string") return { stringValue: val };
-  if (t === "boolean") return { booleanValue: val };
-  if (t === "number") return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val };
-  if (Array.isArray(val)) return { arrayValue: { values: val.map(jsToFirestoreValue) } };
-  if (val instanceof Date) return { timestampValue: val.toISOString() };
-  if (t === "object") {
+  if (typeof val === 'boolean') return { booleanValue: val };
+  if (typeof val === 'number') {
+    if (Number.isInteger(val)) return { integerValue: val.toString() };
+    return { doubleValue: val };
+  }
+  if (typeof val === 'string') return { stringValue: val };
+  if (Array.isArray(val)) {
+    return { arrayValue: { values: val.map(jsToFirestoreValue) } };
+  }
+  if (typeof val === 'object') {
     const fields: Record<string, any> = {};
     for (const [k, v] of Object.entries(val)) {
       if (v !== undefined) fields[k] = jsToFirestoreValue(v);
@@ -73,56 +152,36 @@ function jsToFirestoreValue(val: any): any {
 }
 
 function firestoreValueToJs(val: any): any {
-  if (!val || typeof val !== "object") return val;
-  if (val.nullValue !== undefined) return null;
-  if (val.stringValue !== undefined) return val.stringValue;
-  if (val.booleanValue !== undefined) return val.booleanValue;
-  if (val.integerValue !== undefined) return Number(val.integerValue);
-  if (val.doubleValue !== undefined) return val.doubleValue;
-  if (val.timestampValue !== undefined) return val.timestampValue;
-  if (val.mapValue?.fields) {
-    const obj: Record<string, any> = {};
-    for (const [k, v] of Object.entries(val.mapValue.fields)) obj[k] = firestoreValueToJs(v);
-    return obj;
+  if (!val) return null;
+  if ('nullValue' in val) return null;
+  if ('booleanValue' in val) return val.booleanValue;
+  if ('integerValue' in val) return parseInt(val.integerValue, 10);
+  if ('doubleValue' in val) return val.doubleValue;
+  if ('stringValue' in val) return val.stringValue;
+  if ('timestampValue' in val) return val.timestampValue;
+  if ('arrayValue' in val) {
+    return (val.arrayValue.values || []).map(firestoreValueToJs);
   }
-  if (val.arrayValue?.values) return val.arrayValue.values.map(firestoreValueToJs);
-  return val;
+  if ('mapValue' in val) {
+    const result: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val.mapValue.fields || {})) {
+      result[k] = firestoreValueToJs(v as any);
+    }
+    return result;
+  }
+  return null;
 }
 
-let cachedToken: { token: string; expiresAt: number } | null = null;
-
-async function getGoogleAccessToken(): Promise<string> {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-  if (!clientId || !clientSecret || !refreshToken) throw new Error("Google OAuth env vars not configured");
-  if (cachedToken && Date.now() < cachedToken.expiresAt) return cachedToken.token;
-
-  const resp = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      refresh_token: refreshToken,
-      grant_type: "refresh_token",
-    }),
-  });
-  const data = await resp.json() as any;
-  if (!data.access_token) throw new Error("Failed to get Google access token: " + JSON.stringify(data));
-  cachedToken = { token: data.access_token, expiresAt: Date.now() + (data.expires_in - 60) * 1000 };
-  return data.access_token;
-}
-
-async function firestoreGetDocument(path: string) {
+async function firestoreGetDocument(path: string): Promise<any | null> {
   const token = await getGoogleAccessToken();
-  const resp = await fetch(`https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!resp.ok && resp.status !== 404) throw new Error(`Firestore GET failed: ${resp.status} ${await resp.text()}`);
+  const resp = await fetch(
+    `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${path}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
   if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error(`Firestore GET failed: ${resp.status} ${await resp.text()}`);
   const data = await resp.json() as any;
-  const result: Record<string, any> = { id: data.name.split("/").pop() };
+  const result: Record<string, any> = { id: data.name.split('/').pop() };
   if (data.fields) {
     for (const [k, v] of Object.entries(data.fields)) {
       result[k] = firestoreValueToJs(v as any);
@@ -133,19 +192,16 @@ async function firestoreGetDocument(path: string) {
 
 async function firestoreSetDocument(collection: string, id: string, data: any) {
   const token = await getGoogleAccessToken();
-  const body = { fields: jsToFirestoreValue(data).mapValue.fields };
-  let resp = await fetch(
+  const fields = jsToFirestoreValue(data).mapValue.fields;
+  const resp = await fetch(
     `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${collection}/${id}`,
-    { method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ fields }),
+    }
   );
-  if (resp.status === 404) {
-    resp = await fetch(
-      `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${collection}?documentId=${id}`,
-      { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }
-    );
-  }
   if (!resp.ok) throw new Error(`Firestore SET failed: ${resp.status} ${await resp.text()}`);
-  return resp.json();
 }
 
 async function firestoreDeleteDocument(collection: string, id: string) {
@@ -293,7 +349,7 @@ export async function runFirestoreTransaction<T>(
     }
 
     const commitErrText = await commitResp.text();
-    const isContention = commitResp.status === 409 || commitErrText.includes("ABORTED") || commitErrText.includes("conflict");
+    const isContention = commitResp.status === 409 || commitResp.status === 503 || commitErrText.includes("ABORTED") || commitErrText.includes("conflict") || commitErrText.includes("UNAVAILABLE");
     if (isContention && attempt < maxRetries) {
       const backoffMs = Math.min(1000, Math.pow(2, attempt) * 40 + Math.floor(Math.random() * 30));
       await new Promise(resolve => setTimeout(resolve, backoffMs));
@@ -317,342 +373,334 @@ async function auditLog(eventType: string, userId: string, userEmail: string, de
       eventType,
       userId,
       userEmail,
-      ...details,
+      ip: details.ip || 'server',
+      details,
     });
-  } catch (e) {
-    console.error('Failed to write audit log:', e);
+  } catch (e: any) {
+    console.error('Failed to write audit log:', e.message);
   }
 }
 
-async function startServer() {
-  if (!process.env.NODE_ENV) process.env.NODE_ENV = 'production';
-  const app = express();
-  const PORT = parseInt(process.env.PORT || '3000', 10);
+// In-memory session store (validated server-side)
+const serverSessions = new Map<string, { employeeId: string; expiresAt: number }>();
 
-  // Security Headers
+function generateSessionToken(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+export function cleanExpiredSessions() {
+  const now = Date.now();
+  for (const [token, sess] of serverSessions.entries()) {
+    if (sess.expiresAt < now) serverSessions.delete(token);
+  }
+}
+setInterval(cleanExpiredSessions, 10 * 60 * 1000);
+
+async function startServer() {
+  const app = express();
+  const PORT = parseInt(process.env.PORT || "3000", 10);
+
   app.set('trust proxy', 1);
+
   app.use(helmet({
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
-        imgSrc: ["'self'", "data:", "https:"],
-        connectSrc: ["'self'", "https://firestore.googleapis.com", "https://identitytoolkit.googleapis.com", "https://securetoken.googleapis.com", "wss://*.firebaseio.com"],
-      }
+        imgSrc: ["'self'", "data:", "blob:"],
+        connectSrc: [
+          "'self'",
+          "https://*.firebaseio.com",
+          "https://*.googleapis.com",
+          "https://identitytoolkit.googleapis.com",
+          "https://securetoken.googleapis.com",
+          "https://firestore.googleapis.com",
+        ],
+      },
     },
     crossOriginEmbedderPolicy: false,
   }));
 
-  // CORS - allow same-origin and configured origins (API routes only)
-  const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
-  const isProduction = process.env.NODE_ENV === 'production';
-  app.use((req, res, next) => {
-    if (!req.path.startsWith('/api/')) return next();
-
-    const origin = req.headers.origin;
-    const host = req.headers.host;
-
-    if (origin && host) {
-      try {
-        const originUrl = new URL(origin);
-        if (originUrl.host === host) {
-          res.setHeader('Access-Control-Allow-Origin', origin);
-          if (req.method === 'OPTIONS') return res.sendStatus(204);
-          return next();
-        }
-      } catch {}
-    }
-
-    if (ALLOWED_ORIGINS.length > 0 && origin && ALLOWED_ORIGINS.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    } else if (!origin) {
-      // allow same-origin
-    } else if (isProduction && origin) {
-      return res.status(403).json({ error: "CORS origin denied" });
-    }
-    if (req.method === 'OPTIONS') return res.sendStatus(204);
-    next();
-  });
-
-  // Body Parser (Limit payload size to 10mb for backups)
-  app.use(express.json({ limit: "10mb" }));
-
-  // In-Memory Session Store
-  const sessions = new Map<string, { uid: string; email: string; createdAt: number }>();
-  const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-  function createSession(uid: string, email: string): string {
-    const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, { uid, email, createdAt: Date.now() });
-    return token;
-  }
-
-  function getSession(token: string): { uid: string; email: string } | null {
-    const session = sessions.get(token);
-    if (!session) return null;
-    if (Date.now() - session.createdAt > SESSION_TTL) {
-      sessions.delete(token);
-      return null;
-    }
-    return { uid: session.uid, email: session.email };
-  }
-
-  // Rate Limiting
-  const apiLimiter = rateLimit({
+  const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 500,
+    message: { error: "Too many requests, please try again later." },
     standardHeaders: true,
     legacyHeaders: false,
     skip: (req) => {
-      const p = req.path;
-      return p === '/api/auth/login' || p === '/api/clockin' || p === '/api/clockout';
+      const skipPaths = [
+        '/api/auth/login',
+        '/api/clockin',
+        '/api/clockout',
+        '/api/has-employees',
+        '/api/bootstrap',
+      ];
+      return skipPaths.includes(req.path);
     },
-    message: { error: "طلبات كثيرة جداً، يرجى المحاولة لاحقاً" }
   });
 
-  app.use("/api/", apiLimiter);
-
-  // Stricter rate limit for admin/user-management endpoints
-  const adminLimiter = rateLimit({
+  const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 10,
+    message: { error: "Too many login attempts. Please try again after 15 minutes." },
     standardHeaders: true,
     legacyHeaders: false,
-    message: { error: "طلبات كثيرة جداً، يرجى المحاولة لاحقاً" }
   });
 
-  let aiClient: GoogleGenAI | null = null;
-  function getAI() {
-    if (!aiClient) {
-      const key = process.env.GEMINI_API_KEY;
-      if (!key) return null;
-      aiClient = new GoogleGenAI({ apiKey: key, httpOptions: { headers: { "User-Agent": "aistudio-build" } } });
+  const adminLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    message: { error: "Too many admin requests." },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  app.use(globalLimiter);
+
+  // CORS lock-down
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    const isProduction = process.env.NODE_ENV === 'production';
+    const host = req.headers.host;
+
+    if (!origin) {
+      return next();
     }
-    return aiClient;
+
+    if (host) {
+      const originHost = origin.replace(/^https?:\/\//, '');
+      if (originHost === host) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+        if (req.method === 'OPTIONS') return res.sendStatus(204);
+        return next();
+      }
+    }
+
+    const allowedOrigins = process.env.ALLOWED_ORIGINS
+      ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim())
+      : [];
+
+    if (!isProduction) {
+      allowedOrigins.push('http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173');
+    }
+
+    if (allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      if (req.method === 'OPTIONS') return res.sendStatus(204);
+      return next();
+    }
+
+    if (req.path.startsWith('/api/')) {
+      return res.status(403).json({ error: 'CORS policy: Origin not allowed' });
+    }
+    return next();
+  });
+
+  app.use(express.json({ limit: '10mb' }));
+
+  let aiInstance: GoogleGenAI | null = null;
+  function getAI(): GoogleGenAI | null {
+    if (aiInstance) return aiInstance;
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+    aiInstance = new GoogleGenAI({ apiKey });
+    return aiInstance;
   }
 
-  // Authentication Middleware
-  const requireFirebaseAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-          return res.status(401).json({ error: "Missing or invalid authorization header" });
-      }
+  // Auth Middleware
+  async function requireFirebaseAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Missing or invalid authorization header" });
+    }
+    const token = authHeader.split("Bearer ")[1];
 
-      const token = authHeader.split('Bearer ')[1];
+    if (token.startsWith('sess_')) {
+      const session = serverSessions.get(token);
+      if (session && session.expiresAt > Date.now()) {
+        req.uid = session.employeeId;
+        try {
+          const emp = await firestoreGetDocument(`employees/${session.employeeId}`);
+          if (emp) {
+            req.employee = emp;
+            return next();
+          }
+        } catch {}
+      }
+      serverSessions.delete(token);
+      return res.status(401).json({ error: "Session expired or invalid" });
+    }
+
+    try {
+      const resp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ idToken: token }),
+        }
+      );
+      if (!resp.ok) {
+        return res.status(401).json({ error: "Invalid or expired Firebase Auth token" });
+      }
+      const data = await resp.json() as any;
+      const user = data.users?.[0];
+      if (!user) {
+        return res.status(401).json({ error: "User not found for token" });
+      }
+      req.uid = user.localId;
       try {
-          let uid: string | null = null;
-          const session = getSession(token);
-          if (session) {
-              uid = session.uid;
-          } else {
-              const resp = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${process.env.VITE_FIREBASE_API_KEY || ''}`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ idToken: token })
-              });
-              if (!resp.ok) {
-                  return res.status(401).json({ error: "Unauthorized: Invalid token" });
-              }
-              const data = await resp.json() as any;
-              uid = data.users?.[0]?.localId;
-          }
-
-          if (!uid) {
-              return res.status(401).json({ error: "Invalid token payload" });
-          }
-          const employee = await firestoreGetDocument(`employees/${uid}`);
-          if (!employee) {
-              return res.status(403).json({ error: "Employee record not found" });
-          }
-          req.uid = uid;
-          req.employee = employee;
-          next();
-      } catch (e) {
-          res.status(500).json({ error: "Failed to verify token" });
-      }
-  };
-
-  // Require a specific permission on the authenticated employee
-  const requirePermission = (permission: string) => {
-      return (req: express.Request, res: express.Response, next: express.NextFunction) => {
-          if (!req.employee) {
-              return res.status(401).json({ error: "Authentication required" });
-          }
-          const permissions: string[] = req.employee.permissions || [];
-          if (!permissions.includes(permission) && !permissions.includes('employees') && !permissions.includes('settings')) {
-              return res.status(403).json({ error: `Missing required permission: ${permission}` });
-          }
-          next();
-      };
-  };
-
-  // Require admin-level access (employees permission or settings)
-  const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-      if (!req.employee) {
-          return res.status(401).json({ error: "Authentication required" });
-      }
-      const permissions: string[] = req.employee.permissions || [];
-      if (!permissions.includes('employees') && !permissions.includes('settings')) {
-          return res.status(403).json({ error: "Admin access required" });
+        const emp = await firestoreGetDocument(`employees/${user.localId}`);
+        req.employee = emp || null;
+      } catch {
+        req.employee = null;
       }
       next();
-  };
+    } catch (e: any) {
+      res.status(401).json({ error: "Token verification failed: " + e.message });
+    }
+  }
 
-  // ---- Public endpoints (no auth required) ----
-
-  app.get("/api/health", (req, res) => res.json({ status: "ok" }));
-
-  app.get("/api/admin/has-employees", async (_req, res) => {
-    try {
-      const token = await getGoogleAccessToken();
-      const resp = await fetch(
-        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (resp.ok) {
-        const data = await resp.json() as any;
-        return res.json({ hasEmployees: !!(data.documents && data.documents.length > 0) });
+  function requirePermission(perm: string) {
+    return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      const employee = req.employee;
+      if (!employee) return res.status(403).json({ error: "Access denied: employee record not found" });
+      const perms: string[] = employee.permissions || [];
+      if (perms.includes('employees') || perms.includes('settings') || perms.includes(perm)) {
+        return next();
       }
-      res.json({ hasEmployees: false });
-    } catch {
-      res.json({ hasEmployees: false });
-    }
-  });
+      return res.status(403).json({ error: `Access denied: missing "${perm}" permission` });
+    };
+  }
 
-  app.get("/api/auth/employees", async (_req, res) => {
+  function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+    const employee = req.employee;
+    if (!employee) return res.status(403).json({ error: "Access denied: employee record not found" });
+    const perms: string[] = employee.permissions || [];
+    if (perms.includes('employees') || perms.includes('settings')) {
+      return next();
+    }
+    return res.status(403).json({ error: "Access denied: admin permission required" });
+  }
+
+  // ---- Public / Auth Endpoints ----
+
+  app.get("/api/has-employees", async (req, res) => {
     try {
       const token = await getGoogleAccessToken();
       const resp = await fetch(
-        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees`,
+        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees?pageSize=1`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      if (!resp.ok) return res.json([]);
+      if (!resp.ok) {
+        return res.json({ hasEmployees: false });
+      }
       const data = await resp.json() as any;
-      if (!data.documents) return res.json([]);
-      const employees = data.documents.map((doc: any) => {
-        const f = doc.fields || {};
-        return {
-          id: doc.name.split('/').pop(),
-          name: f.name?.stringValue || '',
-          email: f.email?.stringValue || '',
-        };
-      }).filter((e: any) => e.name || e.email);
-      res.json(employees);
-    } catch {
-      res.json([]);
+      const hasEmployees = Boolean(data.documents && data.documents.length > 0);
+      res.json({ hasEmployees });
+    } catch (e: any) {
+      res.json({ hasEmployees: false });
     }
   });
 
-  const BOOTSTRAP_PASSWORD = process.env.ADMIN_BOOTSTRAP_PASSWORD || 'TaibaAdmin2024!';
-
-  app.post("/api/admin/bootstrap", adminLimiter, async (req, res) => {
+  app.post("/api/bootstrap", async (req, res) => {
     try {
+      const { password, name, email } = req.body;
+      const expectedPass = process.env.BOOTSTRAP_PASSWORD;
+      if (!expectedPass) {
+        return res.status(400).json({ error: "Bootstrap is disabled (BOOTSTRAP_PASSWORD not configured)" });
+      }
+      if (password !== expectedPass) {
+        return res.status(403).json({ error: "Invalid bootstrap password" });
+      }
+
       const token = await getGoogleAccessToken();
       const checkResp = await fetch(
-        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees`,
+        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees?pageSize=1`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (checkResp.ok) {
-        const data = await checkResp.json() as any;
-        if (data.documents && data.documents.length > 0) {
-          return res.status(403).json({ error: "System is already initialized. Bootstrap endpoint is disabled." });
+        const checkData = await checkResp.json() as any;
+        if (checkData.documents && checkData.documents.length > 0) {
+          return res.status(400).json({ error: "System already bootstrapped. Use normal admin login." });
         }
       }
 
-      const { name, email, password } = req.body;
-      if (!name || !email || !password) {
-        return res.status(400).json({ error: "Missing required fields: name, email, password" });
-      }
-      if (password !== BOOTSTRAP_PASSWORD) {
-        return res.status(403).json({ error: "Invalid bootstrap authorization password" });
-      }
-
-      const adminId = 'admin-' + crypto.randomBytes(4).toString('hex');
-      const passwordHash = hashPassword(password);
+      const adminId = 'emp-admin-01';
+      const adminPass = process.env.ADMIN_INITIAL_PASSWORD || 'Admin@123456';
+      const passwordHash = hashPassword(adminPass);
 
       await firestoreSetDocument('employees', adminId, {
         id: adminId,
-        name,
-        email,
+        name: name || 'المدير العام',
+        email: email || 'admin@taiba.local',
         passwordHash,
-        role: 'مدير',
+        role: 'المدير العام',
         type: 'دوام كامل',
         salary: 0,
-        permissions: ['dashboard', 'pos', 'invoices', 'inventory', 'reports', 'expenses', 'employees', 'settings'],
+        permissions: ['dashboard', 'pos', 'inventory', 'customers', 'suppliers', 'expenses', 'employees', 'reports', 'settings', 'attendance'],
         createdAt: new Date().toISOString(),
       });
 
-      const sessionToken = createSession(adminId, email);
-      await auditLog('system_bootstrap', adminId, email, { name, role: 'مدير' });
-      res.json({ ok: true, token: sessionToken, employee: { id: adminId, name, email, role: 'مدير' } });
+      await auditLog('bootstrap_executed', 'system', 'system', { adminId });
+      res.json({ ok: true, message: "Admin created successfully. Please login and change password immediately." });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  app.post("/api/auth/login", adminLimiter, async (req, res) => {
+  app.post("/api/auth/login", authLimiter, async (req, res) => {
     try {
-      const { email, password } = req.body;
-      if (!email || !password) {
-        return res.status(400).json({ error: "Missing email or password" });
+      const { employeeId, password } = req.body;
+      if (!employeeId || !password) {
+        return res.status(400).json({ error: "Missing employeeId or password" });
+      }
+      if (!isValidDocumentId(employeeId)) {
+        return res.status(400).json({ error: "Invalid employee ID format" });
       }
 
-      const token = await getGoogleAccessToken();
-      const resp = await fetch(
-        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (!resp.ok) return res.status(401).json({ error: "Invalid credentials" });
+      const emp = await firestoreGetDocument(`employees/${employeeId}`);
+      if (!emp) {
+        return res.status(401).json({ error: "اسم المستخدم أو كلمة المرور غير صحيحة" });
+      }
 
-      const data = await resp.json() as any;
-      const docs = data.documents || [];
+      const storedHash = emp.passwordHash || emp.password || '';
+      const isValid = verifyPassword(password, storedHash);
 
-      let matchedEmployee: any = null;
-      for (const doc of docs) {
-        const emp = { id: doc.name.split('/').pop(), ...firestoreValueToJs({ mapValue: { fields: doc.fields } }) };
-        if (emp.email?.toLowerCase() === email.toLowerCase() || emp.name === email) {
-          matchedEmployee = emp;
-          break;
+      if (!isValid) {
+        await auditLog('auth_login_failed', employeeId, emp.email, { reason: 'bad_password', ip: req.ip });
+        return res.status(401).json({ error: "اسم المستخدم أو كلمة المرور غير صحيحة" });
+      }
+
+      if (isLegacyPassword(storedHash)) {
+        try {
+          const newHash = hashPassword(password);
+          const updatedEmp = { ...emp, passwordHash: newHash };
+          delete updatedEmp.password;
+          await firestoreSetDocument('employees', employeeId, updatedEmp);
+        } catch (migErr) {
+          console.error('Password auto-migration failed:', migErr);
         }
       }
 
-      if (!matchedEmployee || !matchedEmployee.passwordHash) {
-        return res.status(401).json({ error: "Invalid credentials" });
-      }
+      const sessionToken = `sess_${generateSessionToken()}`;
+      const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
+      serverSessions.set(sessionToken, { employeeId, expiresAt });
 
-      const isValid = verifyPassword(password, matchedEmployee.passwordHash);
-      if (!isValid) {
-        return res.status(401).json({ error: "Invalid credentials" });
-      }
+      const safeEmployee = { ...emp };
+      delete safeEmployee.passwordHash;
+      delete safeEmployee.password;
 
-      if (!matchedEmployee.passwordHash.startsWith('scrypt$')) {
-        const upgradedHash = hashPassword(password);
-        await firestoreSetDocument('employees', matchedEmployee.id, {
-          ...matchedEmployee,
-          passwordHash: upgradedHash,
-        });
-      }
-
-      const sessionToken = createSession(matchedEmployee.id, matchedEmployee.email);
-      const { passwordHash: _, ...safeEmployee } = matchedEmployee;
-      await auditLog('user_login', matchedEmployee.id, matchedEmployee.email, {});
-      res.json({ ok: true, token: sessionToken, employee: safeEmployee });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post("/api/auth/logout", async (req, res) => {
-    try {
-      const authHeader = req.headers.authorization;
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        const token = authHeader.split('Bearer ')[1];
-        sessions.delete(token);
-      }
-      res.json({ ok: true });
+      await auditLog('auth_login_success', employeeId, emp.email, { ip: req.ip });
+      res.json({ token: sessionToken, employee: safeEmployee });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -660,58 +708,61 @@ async function startServer() {
 
   app.post("/api/auth/change-password", requireFirebaseAuth, async (req, res) => {
     try {
-      const { currentPassword, newPassword } = req.body;
-      if (!currentPassword || !newPassword) {
-        return res.status(400).json({ error: "Missing current or new password" });
+      const { oldPassword, newPassword } = req.body;
+      if (!oldPassword || !newPassword) {
+        return res.status(400).json({ error: "Missing required fields" });
       }
-      if (newPassword.length < 6) {
-        return res.status(400).json({ error: "Password must be at least 6 characters" });
+      if (typeof newPassword !== 'string' || newPassword.length < 6) {
+        return res.status(400).json({ error: "كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل" });
       }
 
-      const employee = req.employee;
-      if (!employee.passwordHash || !verifyPassword(currentPassword, employee.passwordHash)) {
-        return res.status(400).json({ error: "Current password is incorrect" });
+      const emp = req.employee;
+      if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+      const storedHash = emp.passwordHash || emp.password || '';
+      if (!verifyPassword(oldPassword, storedHash)) {
+        return res.status(401).json({ error: "كلمة المرور الحالية غير صحيحة" });
       }
 
       const newHash = hashPassword(newPassword);
-      await firestoreSetDocument('employees', req.uid!, {
-        ...employee,
-        passwordHash: newHash,
-      });
+      const updated = { ...emp, passwordHash: newHash };
+      delete updated.password;
+      await firestoreSetDocument('employees', emp.id, updated);
 
-      await auditLog('password_changed', req.uid!, employee.email, {});
+      await auditLog('password_changed', req.uid!, emp.email, { ip: req.ip });
       res.json({ ok: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  // ---- Admin user management endpoints ----
+  // ---- Admin endpoints ----
 
-  app.post("/api/admin/migrate-users", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
+  app.post("/api/admin/reset-password", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
     try {
-      const { users } = req.body;
-      if (!Array.isArray(users)) return res.status(400).json({ error: "Users must be an array" });
-
-      let count = 0;
-      for (const u of users) {
-        if (!u.id || !u.name) continue;
-        const passwordHash = hashPassword(u.password || '123456');
-        await firestoreSetDocument('employees', u.id, {
-          id: u.id,
-          name: u.name,
-          email: u.email || `${u.name}@taiba.local`,
-          passwordHash,
-          role: u.role || 'كاشير',
-          type: u.type || 'دوام كامل',
-          salary: u.salary || 0,
-          permissions: u.permissions || ['pos'],
-        });
-        count++;
+      const { targetEmployeeId, newPassword } = req.body;
+      if (!targetEmployeeId || !newPassword) {
+        return res.status(400).json({ error: "Missing targetEmployeeId or newPassword" });
+      }
+      if (!isValidDocumentId(targetEmployeeId)) return res.status(400).json({ error: "Invalid employee ID format" });
+      if (typeof newPassword !== 'string' || newPassword.length < 6) {
+        return res.status(400).json({ error: "كلمة المرور يجب أن تكون 6 أحرف على الأقل" });
       }
 
-      await auditLog('users_migrated', req.uid!, req.employee?.email, { count });
-      res.json({ ok: true, count });
+      const emp = await firestoreGetDocument(`employees/${targetEmployeeId}`);
+      if (!emp) return res.status(404).json({ error: "Target employee not found" });
+
+      const passwordHash = hashPassword(newPassword);
+      const updated = { ...emp, passwordHash };
+      delete updated.password;
+      await firestoreSetDocument('employees', targetEmployeeId, updated);
+
+      for (const [tok, sess] of serverSessions.entries()) {
+        if (sess.employeeId === targetEmployeeId) serverSessions.delete(tok);
+      }
+
+      await auditLog('admin_reset_password', req.uid!, req.employee?.email, { targetEmployeeId });
+      res.json({ ok: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -719,58 +770,21 @@ async function startServer() {
 
   app.post("/api/admin/delete-user", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
     try {
-      const { uid } = req.body;
-      if (!uid || !isValidDocumentId(uid)) return res.status(400).json({ error: "Missing or invalid uid" });
-      if (uid === req.uid) {
-        return res.status(400).json({ error: "Cannot delete your own account" });
+      const { targetEmployeeId } = req.body;
+      if (!targetEmployeeId || !isValidDocumentId(targetEmployeeId)) {
+        return res.status(400).json({ error: "Missing or invalid targetEmployeeId" });
+      }
+      if (targetEmployeeId === req.uid) {
+        return res.status(400).json({ error: "لا يمكنك حذف حسابك الخاص" });
       }
 
-      await firestoreDeleteDocument('employees', uid);
+      await firestoreDeleteDocument('employees', targetEmployeeId);
 
-      const token = await getGoogleAccessToken();
-      const attResp = await fetch(
-        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/attendance`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (attResp.ok) {
-        const attData = await attResp.json() as any;
-        const attDocs = attData.documents || [];
-        for (const doc of attDocs) {
-          const empId = doc.fields?.employeeId?.stringValue;
-          if (empId === uid) {
-            const attId = doc.name.split('/').pop();
-            await firestoreDeleteDocument('attendance', attId);
-          }
-        }
+      for (const [tok, sess] of serverSessions.entries()) {
+        if (sess.employeeId === targetEmployeeId) serverSessions.delete(tok);
       }
 
-      await auditLog('user_deleted', req.uid!, req.employee?.email, { targetUid: uid });
-      res.json({ ok: true });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post("/api/admin/reset-password", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
-    try {
-      const { uid, newPassword } = req.body;
-      if (!uid || !isValidDocumentId(uid) || !newPassword) {
-        return res.status(400).json({ error: "Missing uid or newPassword" });
-      }
-      if (newPassword.length < 6) {
-        return res.status(400).json({ error: "Password must be at least 6 characters" });
-      }
-
-      const targetEmp = await firestoreGetDocument(`employees/${uid}`);
-      if (!targetEmp) return res.status(404).json({ error: "Employee not found" });
-
-      const newHash = hashPassword(newPassword);
-      await firestoreSetDocument('employees', uid, {
-        ...targetEmp,
-        passwordHash: newHash,
-      });
-
-      await auditLog('password_reset_by_admin', req.uid!, req.employee?.email, { targetUid: uid });
+      await auditLog('user_deleted', req.uid!, req.employee?.email, { targetEmployeeId });
       res.json({ ok: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -781,10 +795,10 @@ async function startServer() {
     try {
       const { name, email, password, role, type, salary, permissions } = req.body;
       if (!name || !email || !password) {
-        return res.status(400).json({ error: "Missing name, email, or password" });
+        return res.status(400).json({ error: "Missing required fields: name, email, password" });
       }
-      if (password.length < 6) {
-        return res.status(400).json({ error: "Password must be at least 6 characters" });
+      if (typeof password !== 'string' || password.length < 6) {
+        return res.status(400).json({ error: "كلمة المرور يجب أن تكون 6 أحرف على الأقل" });
       }
 
       const empId = 'emp-' + crypto.randomBytes(4).toString('hex');
@@ -997,35 +1011,27 @@ ${JSON.stringify(summary, null, 2)}
 
       for (const w of writes) {
         if (!w.collection || !isValidCollection(w.collection)) {
-          return res.status(403).json({ error: `Access denied: invalid collection "${w.collection}"` });
+          return res.status(400).json({ error: `Invalid collection in batch write: ${w.collection}` });
         }
         if (!w.id || !isValidDocumentId(w.id)) {
-          return res.status(400).json({ error: `Invalid document ID: "${w.id}"` });
-        }
-        if (w.type !== "set" && w.type !== "delete") {
-          return res.status(400).json({ error: `Invalid write type: "${w.type}"` });
+          return res.status(400).json({ error: `Invalid document ID in batch write: ${w.id}` });
         }
         if (!hasWritePermission(req.employee, w.collection)) {
           return res.status(403).json({ error: `Access denied: missing permission for collection "${w.collection}"` });
         }
-        if (w.type === "set") {
-          const validationError = validateProxyPayload(w.collection, w.id, w.data);
-          if (validationError) return res.status(400).json({ error: `${w.collection}/${w.id}: ${validationError}` });
-        }
-        if (w.type === "delete" && w.collection === 'audit_logs') {
-          return res.status(403).json({ error: "Cannot delete audit logs" });
-        }
-        if (w.type === "delete" && w.collection === 'employees' && w.id === req.uid) {
-          return res.status(403).json({ error: "Cannot delete your own employee record via batch" });
+        if (w.type === 'set' && w.data) {
+          const valError = validateProxyPayload(w.collection, w.id, w.data);
+          if (valError) return res.status(400).json({ error: `Batch validation error on ${w.collection}/${w.id}: ${valError}` });
         }
       }
 
       const token = await getGoogleAccessToken();
-      const batchBody: any = { writes: writes.map((w: any) => {
-        if (w.type === "set") {
-          return { update: { name: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}`, fields: jsToFirestoreValue(w.data).mapValue.fields } };
+      const batchBody: any = { writes: writes.map(w => {
+        if (w.type === 'set') {
+          const fields = jsToFirestoreValue(w.data || {}).mapValue.fields;
+          return { update: { name: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}`, fields } };
         }
-        if (w.type === "delete") {
+        if (w.type === 'delete') {
           return { delete: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}` };
         }
         return null;
@@ -1065,7 +1071,7 @@ ${JSON.stringify(summary, null, 2)}
     if (!resp.ok) throw new Error(`Firestore commit failed: ${resp.status} ${await resp.text()}`);
   }
 
-  // ---- Sales transactional endpoints (AUDIT-005 Fixed: Full ACID & Concurrency Guarantees) ----
+  // ---- Sales transactional endpoints (AUDIT-005, AUDIT-013, AUDIT-014 Enforced) ----
 
   app.post("/api/sales/create", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
     try {
@@ -1077,8 +1083,25 @@ ${JSON.stringify(summary, null, 2)}
       if (norm.error) return res.status(400).json({ error: norm.error });
       const stockItems = norm.items || [];
 
-      await runFirestoreTransaction(async (txn) => {
-        // --- 1. READ PHASE (all reads strictly before writes) ---
+      const result = await runFirestoreTransaction(async (txn) => {
+        // --- 1. IDEMPOTENCY CHECK (AUDIT-014) ---
+        const existingSaleDoc = await txn.get('sales', sale.id);
+        if (existingSaleDoc && existingSaleDoc.data) {
+          const existing = existingSaleDoc.data;
+          if (
+            existing.createdBy === sale.createdBy &&
+            existing.customerId === (sale.customerId || '') &&
+            existing.items?.length === sale.items?.length
+          ) {
+            return { ok: true, duplicate: true, saleId: sale.id, totalAmount: existing.totalAmount, profit: existing.profit, message: 'Sale already processed' };
+          }
+          const err: any = new Error("Idempotency key reused with different sale payload");
+          err.code = "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD";
+          err.status = 409;
+          throw err;
+        }
+
+        // --- 2. READ PHASE (all reads strictly before writes) ---
         const productsMap = new Map<string, any>();
         for (const item of stockItems) {
           const prodDoc = await txn.get('products', item.productId);
@@ -1109,8 +1132,54 @@ ${JSON.stringify(summary, null, 2)}
           }
         }
 
-        // --- 2. WRITE PHASE (atomic commit) ---
-        txn.set('sales', sale.id, sale);
+        // --- 3. SERVER-SIDE FINANCIAL RECALCULATION (AUDIT-013) ---
+        let serverTotalAmount = 0;
+        let serverTotalCost = 0;
+        const verifiedItems = (sale.items as any[]).map((rawItem: any) => {
+          if (rawItem.isManualItem) {
+            const buyPrice = typeof rawItem.purchasePrice === 'number' && Number.isFinite(rawItem.purchasePrice) && rawItem.purchasePrice >= 0 ? rawItem.purchasePrice : 0;
+            const sellPrice = typeof rawItem.sellingPrice === 'number' && Number.isFinite(rawItem.sellingPrice) && rawItem.sellingPrice > 0 ? rawItem.sellingPrice : 0;
+            const qty = rawItem.quantity || 1;
+            serverTotalAmount += sellPrice * qty;
+            serverTotalCost += buyPrice * qty;
+            return {
+              ...rawItem,
+              sellingPrice: sellPrice,
+              purchasePrice: buyPrice,
+            };
+          }
+
+          const trustedProduct = productsMap.get(rawItem.id);
+          const trustedSellPrice = typeof trustedProduct?.sellingPrice === 'number' ? trustedProduct.sellingPrice : (rawItem.sellingPrice || 0);
+          const trustedBuyPrice = typeof trustedProduct?.purchasePrice === 'number' ? trustedProduct.purchasePrice : (rawItem.purchasePrice || 0);
+          const qty = rawItem.quantity;
+          
+          serverTotalAmount += trustedSellPrice * qty;
+          serverTotalCost += trustedBuyPrice * qty;
+
+          return {
+            ...rawItem,
+            name: trustedProduct?.name || rawItem.name,
+            category: trustedProduct?.category || rawItem.category,
+            size: trustedProduct?.size || rawItem.size,
+            color: trustedProduct?.color || rawItem.color,
+            sellingPrice: trustedSellPrice,
+            purchasePrice: trustedBuyPrice,
+          };
+        });
+
+        serverTotalAmount = roundMoney(serverTotalAmount);
+        const serverProfit = roundMoney(serverTotalAmount - serverTotalCost);
+
+        const authoritativeSale = {
+          ...sale,
+          items: verifiedItems,
+          totalAmount: serverTotalAmount,
+          profit: serverProfit,
+        };
+
+        // --- 4. WRITE PHASE (atomic commit) ---
+        txn.set('sales', sale.id, authoritativeSale);
 
         for (const item of stockItems) {
           const product = productsMap.get(item.productId);
@@ -1120,16 +1189,20 @@ ${JSON.stringify(summary, null, 2)}
 
         if (sale.customerId && customerDoc) {
           const isDebt = sale.paymentMethod === 'آجل (دين)';
-          const totalPurchases = (customerDoc.totalPurchases || 0) + sale.totalAmount;
-          const totalDebt = isDebt ? (customerDoc.totalDebt || 0) + sale.totalAmount : (customerDoc.totalDebt || 0);
+          const totalPurchases = roundMoney((customerDoc.totalPurchases || 0) + serverTotalAmount);
+          const totalDebt = isDebt ? roundMoney((customerDoc.totalDebt || 0) + serverTotalAmount) : (customerDoc.totalDebt || 0);
           const updatedCustomer = { ...customerDoc, totalPurchases, totalDebt, lastPurchaseDate: new Date().toISOString() };
           txn.update('customers', sale.customerId, updatedCustomer);
         }
+
+        return { ok: true, saleId: sale.id, totalAmount: serverTotalAmount, profit: serverProfit };
       });
 
       // Audit log strictly after successful transaction commit
-      await auditLog('sale_created', req.uid || '', req.employee?.email || '', { saleId: sale.id, totalAmount: sale.totalAmount, paymentMethod: sale.paymentMethod });
-      res.json({ ok: true });
+      if (!result.duplicate) {
+        await auditLog('sale_created', req.uid || '', req.employee?.email || '', { saleId: sale.id, totalAmount: result.totalAmount, paymentMethod: sale.paymentMethod });
+      }
+      res.json(result);
     } catch (e: any) {
       const status = e.status || (e.code === 'INSUFFICIENT_STOCK' ? 400 : 500);
       res.status(status).json({ error: e.message, code: e.code || 'TRANSACTION_ERROR', details: e.available !== undefined ? { available: e.available, requested: e.requested, productId: e.productId } : undefined });
@@ -1203,8 +1276,45 @@ ${JSON.stringify(summary, null, 2)}
           newCustomerDoc = oldCustomerDoc;
         }
 
+        // --- Recalculate totals server-side (AUDIT-013) ---
+        let serverTotalAmount = 0;
+        let serverTotalCost = 0;
+        const verifiedItems = (sale.items as any[]).map((rawItem: any) => {
+          if (rawItem.isManualItem) {
+            const buyPrice = typeof rawItem.purchasePrice === 'number' && Number.isFinite(rawItem.purchasePrice) && rawItem.purchasePrice >= 0 ? rawItem.purchasePrice : 0;
+            const sellPrice = typeof rawItem.sellingPrice === 'number' && Number.isFinite(rawItem.sellingPrice) && rawItem.sellingPrice > 0 ? rawItem.sellingPrice : 0;
+            const qty = rawItem.quantity || 1;
+            serverTotalAmount += sellPrice * qty;
+            serverTotalCost += buyPrice * qty;
+            return { ...rawItem, sellingPrice: sellPrice, purchasePrice: buyPrice };
+          }
+
+          const prod = productsMap.get(rawItem.id)?.data;
+          const trustedSellPrice = typeof prod?.sellingPrice === 'number' ? prod.sellingPrice : (rawItem.sellingPrice || 0);
+          const trustedBuyPrice = typeof prod?.purchasePrice === 'number' ? prod.purchasePrice : (rawItem.purchasePrice || 0);
+          const qty = rawItem.quantity;
+          serverTotalAmount += trustedSellPrice * qty;
+          serverTotalCost += trustedBuyPrice * qty;
+
+          return {
+            ...rawItem,
+            sellingPrice: trustedSellPrice,
+            purchasePrice: trustedBuyPrice,
+          };
+        });
+
+        serverTotalAmount = roundMoney(serverTotalAmount);
+        const serverProfit = roundMoney(serverTotalAmount - serverTotalCost);
+
+        const authoritativeSale = {
+          ...sale,
+          items: verifiedItems,
+          totalAmount: serverTotalAmount,
+          profit: serverProfit,
+        };
+
         // 2. Write phase
-        txn.set('sales', sale.id, sale);
+        txn.set('sales', sale.id, authoritativeSale);
 
         for (const [pid, { data, delta }] of productsMap.entries()) {
           txn.update('products', pid, { ...data, stock: (data.stock || 0) - delta });
@@ -1212,8 +1322,8 @@ ${JSON.stringify(summary, null, 2)}
 
         if (oldCustomerDoc && oldSale.customerId !== sale.customerId) {
           const oldIsDebt = oldSale.paymentMethod === 'آجل (دين)' && !oldSale.isPaid;
-          const totalPurchases = (oldCustomerDoc.totalPurchases || 0) - (oldSale.totalAmount || 0);
-          const totalDebt = (oldCustomerDoc.totalDebt || 0) - (oldIsDebt ? (oldSale.totalAmount || 0) : 0);
+          const totalPurchases = roundMoney((oldCustomerDoc.totalPurchases || 0) - (oldSale.totalAmount || 0));
+          const totalDebt = roundMoney((oldCustomerDoc.totalDebt || 0) - (oldIsDebt ? (oldSale.totalAmount || 0) : 0));
           txn.update('customers', oldSale.customerId, { ...oldCustomerDoc, totalPurchases: Math.max(0, totalPurchases), totalDebt: Math.max(0, totalDebt) });
         }
 
@@ -1223,8 +1333,8 @@ ${JSON.stringify(summary, null, 2)}
           const prevDebt = (isSameCust && oldSale.paymentMethod === 'آجل (دين)' && !oldSale.isPaid) ? (oldSale.totalAmount || 0) : 0;
           const newIsDebt = sale.paymentMethod === 'آجل (دين)' && !sale.isPaid;
 
-          const totalPurchases = (newCustomerDoc.totalPurchases || 0) - prevPurchases + sale.totalAmount;
-          const totalDebt = (newCustomerDoc.totalDebt || 0) - prevDebt + (newIsDebt ? sale.totalAmount : 0);
+          const totalPurchases = roundMoney((newCustomerDoc.totalPurchases || 0) - prevPurchases + serverTotalAmount);
+          const totalDebt = roundMoney((newCustomerDoc.totalDebt || 0) - prevDebt + (newIsDebt ? serverTotalAmount : 0));
           txn.update('customers', sale.customerId, { ...newCustomerDoc, totalPurchases: Math.max(0, totalPurchases), totalDebt: Math.max(0, totalDebt) });
         }
       });
@@ -1284,8 +1394,8 @@ ${JSON.stringify(summary, null, 2)}
           if (sale.paymentMethod === 'آجل (دين)' && !sale.isPaid) {
             debtAdjustment = -(sale.totalAmount || 0);
           }
-          const totalPurchases = (customerDoc.totalPurchases || 0) - (sale.totalAmount || 0);
-          const totalDebt = (customerDoc.totalDebt || 0) + debtAdjustment;
+          const totalPurchases = roundMoney((customerDoc.totalPurchases || 0) - (sale.totalAmount || 0));
+          const totalDebt = roundMoney((customerDoc.totalDebt || 0) + debtAdjustment);
           const updatedCustomer = { ...customerDoc, totalPurchases: Math.max(0, totalPurchases), totalDebt: Math.max(0, totalDebt) };
           txn.update('customers', sale.customerId, updatedCustomer);
         }
@@ -1346,7 +1456,7 @@ ${JSON.stringify(summary, null, 2)}
         txn.update('sales', saleId, updatedSale);
 
         if (sale.customerId && customerDoc) {
-          const totalDebt = (customerDoc.totalDebt || 0) - (sale.totalAmount || 0);
+          const totalDebt = roundMoney((customerDoc.totalDebt || 0) - (sale.totalAmount || 0));
           const updatedCustomer = { ...customerDoc, totalDebt: Math.max(0, totalDebt) };
           txn.update('customers', sale.customerId, updatedCustomer);
         }
@@ -1421,8 +1531,8 @@ ${JSON.stringify(summary, null, 2)}
           if (originalSale.paymentMethod === 'آجل (دين)' && !originalSale.isPaid) {
             debtAdjustment = -(originalSale.totalAmount || 0);
           }
-          const totalPurchases = (customerDoc.totalPurchases || 0) - (originalSale.totalAmount || 0);
-          const totalDebt = (customerDoc.totalDebt || 0) + debtAdjustment;
+          const totalPurchases = roundMoney((customerDoc.totalPurchases || 0) - (originalSale.totalAmount || 0));
+          const totalDebt = roundMoney((customerDoc.totalDebt || 0) + debtAdjustment);
           const updatedCustomer = { ...customerDoc, totalPurchases: Math.max(0, totalPurchases), totalDebt: Math.max(0, totalDebt) };
           txn.update('customers', originalSale.customerId, updatedCustomer);
         }
