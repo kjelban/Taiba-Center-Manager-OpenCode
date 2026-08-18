@@ -12,6 +12,19 @@ export function getServerSessionToken(): string | null {
   return serverSessionToken;
 }
 
+export async function logoutSession(): Promise<void> {
+  try {
+    const token = serverSessionToken;
+    if (token) {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+    }
+  } catch {}
+  serverSessionToken = null;
+}
+
 async function getIdToken(): Promise<string> {
   if (serverSessionToken) return serverSessionToken;
   throw new Error('Not authenticated');

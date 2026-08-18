@@ -27,8 +27,8 @@ export const WRITE_PERMISSIONS: Record<string, string> = {
   'customers': 'pos',
   'suppliers': 'pos',
   'attendance': 'any',
-  'categories': 'any',
-  'seasons': 'any',
+  'categories': 'settings',
+  'seasons': 'settings',
   'metadata': 'admin',
   'audit_logs': 'admin',
 };
@@ -36,13 +36,13 @@ export const WRITE_PERMISSIONS: Record<string, string> = {
 export function hasWritePermission(employee: any, collection: string): boolean {
   const required = WRITE_PERMISSIONS[collection];
   if (!required) return false;
+  if (!employee || typeof employee !== 'object' || !Array.isArray(employee.permissions)) return false;
+  const perms: string[] = employee.permissions;
   if (required === 'any') return true;
   if (required === 'admin') {
-    const perms: string[] = employee?.permissions || [];
     return perms.includes('employees') || perms.includes('settings');
   }
-  const perms: string[] = employee?.permissions || [];
-  return perms.includes(required);
+  return perms.includes(required) || (required === 'settings' && (perms.includes('settings') || perms.includes('employees')));
 }
 
 // Schema validation for proxy writes

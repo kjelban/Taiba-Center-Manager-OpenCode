@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from "express";
 import path from "path";
+import crypto from "crypto";
 import { GoogleGenAI } from "@google/genai";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
@@ -14,6 +15,32 @@ declare global {
       employee?: any;
     }
   }
+}
+
+// ---- Cryptographic Password Helpers ----
+
+export function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `scrypt$${salt}$${hash}`;
+}
+
+export function verifyPassword(password: string, storedHash: string): boolean {
+  if (!storedHash || typeof storedHash !== 'string') return false;
+  if (storedHash.startsWith('scrypt$')) {
+    const parts = storedHash.split('$');
+    if (parts.length !== 3) return false;
+    const [, salt, hash] = parts;
+    const computedHash = crypto.scryptSync(password, salt, 64).toString('hex');
+    try {
+      return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(computedHash, 'hex'));
+    } catch {
+      return false;
+    }
+  }
+  // Legacy sha256 fallback compatibility
+  const legacyHash = crypto.createHash('sha256').update(password).digest('hex');
+  return storedHash === legacyHash;
 }
 
 // ---- Firestore REST API proxy (bypasses restrictive security rules) ----
@@ -126,7 +153,7 @@ async function firestoreDeleteDocument(collection: string, id: string) {
 
 async function auditLog(eventType: string, userId: string, userEmail: string, details: Record<string, any> = {}) {
   try {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     await firestoreSetDocument('audit_logs', id, {
       id,
       timestamp: new Date().toISOString(),
@@ -236,7 +263,7 @@ async function startServer() {
     return aiClient;
   }
 
-  // Load Firebase Config for Auth (from env var only — file fallback removed for security)
+  // Load Firebase Config for Auth (from env var only)
   let firebaseConfig: any = null;
   try {
       const envConfig = process.env.FIREBASE_APPLET_CONFIG;
@@ -252,11 +279,11 @@ async function startServer() {
 
   // ---- Auth Middleware ----
 
-  // Server-side session store (for when Firebase Auth providers are unavailable)
+  // Server-side session store
   const sessions = new Map<string, { uid: string; email: string; expiresAt: number }>();
 
   function createSessionToken(uid: string, email: string): string {
-    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    const token = crypto.randomBytes(32).toString('hex');
     sessions.set(token, { uid, email, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 });
     return token;
   }
@@ -314,7 +341,6 @@ async function startServer() {
       }
   };
 
-
   // Require a specific permission on the authenticated employee
   const requirePermission = (permission: string) => {
       return (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -322,14 +348,14 @@ async function startServer() {
               return res.status(401).json({ error: "Authentication required" });
           }
           const permissions: string[] = req.employee.permissions || [];
-          if (!permissions.includes(permission)) {
+          if (!permissions.includes(permission) && !permissions.includes('employees') && !permissions.includes('settings')) {
               return res.status(403).json({ error: `Missing required permission: ${permission}` });
           }
           next();
       };
   };
 
-  // Require admin-level access (employees permission)
+  // Require admin-level access (employees permission or settings)
   const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
       if (!req.employee) {
           return res.status(401).json({ error: "Authentication required" });
@@ -357,14 +383,13 @@ async function startServer() {
         const data = await resp.json() as any;
         return res.json({ hasEmployees: !!(data.documents && data.documents.length > 0) });
       }
-      // If Firestore returns non-200 (e.g. empty collection = 404 or 200 with no docs), treat as no employees
       res.json({ hasEmployees: false });
     } catch {
       res.json({ hasEmployees: false });
     }
   });
 
-  // Public: list employee names/emails for login dropdown (no sensitive data)
+  // Public: list employee names/emails for login dropdown
   app.get("/api/auth/employees", async (_req, res) => {
     try {
       const token = await getGoogleAccessToken();
@@ -390,8 +415,6 @@ async function startServer() {
   });
 
   // Bootstrap: create first admin user (only works when no employees exist)
-  // Password is NEVER sent to or compared on the client — all validation is server-side.
-  // If googleUid is provided, the user already authenticated via Google sign-in.
   app.post("/api/admin/bootstrap", adminLimiter, async (req, res) => {
     try {
       const bootstrapPassword = process.env.BOOTSTRAP_PASSWORD;
@@ -403,8 +426,8 @@ async function startServer() {
       if (!email || typeof email !== 'string' || !email.includes('@')) {
         return res.status(400).json({ error: "Invalid email" });
       }
-      if (!password || typeof password !== 'string') {
-        return res.status(400).json({ error: "Password is required" });
+      if (!password || typeof password !== 'string' || password.length < 6) {
+        return res.status(400).json({ error: "Password must be at least 6 characters" });
       }
       if (password !== bootstrapPassword) {
         return res.status(403).json({ error: "Invalid bootstrap password" });
@@ -426,10 +449,8 @@ async function startServer() {
       let newUid: string;
 
       if (googleUid && typeof googleUid === 'string') {
-        // User already authenticated via Google — use their Google Auth UID directly
         newUid = googleUid;
       } else {
-        // Legacy path: create Firebase Auth user via email/password
         if (!firebaseConfig?.apiKey) {
           return res.status(500).json({ error: "Firebase config not available" });
         }
@@ -452,7 +473,7 @@ async function startServer() {
         newUid = createData.localId;
       }
 
-      // Create employee document with full admin permissions
+      const adminPasswordHash = hashPassword(password);
       const adminEmployee = {
         id: newUid,
         name: 'المدير العام',
@@ -461,6 +482,7 @@ async function startServer() {
         type: 'دوام كامل',
         salary: 0,
         permissions: ['dashboard', 'pos', 'invoices', 'inventory', 'reports', 'expenses', 'employees', 'settings'],
+        passwordHash: adminPasswordHash,
       };
       await firestoreSetDocument("employees", newUid, adminEmployee);
 
@@ -472,8 +494,7 @@ async function startServer() {
     }
   });
 
-  // Server-side login: validates password, returns session token + employee data
-  // No Firebase Auth provider required — works even when Email/Password is disabled.
+  // Server-side login
   app.post("/api/auth/login", adminLimiter, async (req, res) => {
     try {
       const { email, password } = req.body;
@@ -484,7 +505,6 @@ async function startServer() {
         return res.status(400).json({ error: "Password is required" });
       }
 
-      // Check if any employees exist
       const token = await getGoogleAccessToken();
       const listResp = await fetch(
         `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees`,
@@ -508,50 +528,67 @@ async function startServer() {
       }
 
       if (employees.length === 0) {
-        // No employees — this is a bootstrap login
         const bootstrapPassword = process.env.BOOTSTRAP_PASSWORD;
         if (!bootstrapPassword || password !== bootstrapPassword) {
           return res.status(403).json({ error: "Invalid credentials. Use the bootstrap password for initial setup." });
         }
-
-        // Find or expect employee to be created via /api/admin/bootstrap first
         return res.status(400).json({ error: "No employees exist. Please use the bootstrap form first." });
       }
 
-      // Find employee by email
       const employee = employees.find((e: any) => e.email === email);
       if (!employee) {
         return res.status(401).json({ error: "البريد الإلكتروني غير مسجل في النظام" });
       }
 
-      // Validate password against stored hash, legacy plain-text password, or bootstrap password
       const storedHash = employee.passwordHash;
       const legacyPassword = employee.password;
       const bootstrapPassword = process.env.BOOTSTRAP_PASSWORD;
 
+      let isValid = false;
+      let needsRehash = false;
+
       if (storedHash) {
-        const { createHash } = await import('crypto');
-        const inputHash = createHash('sha256').update(password).digest('hex');
-        if (inputHash !== storedHash) {
-          return res.status(401).json({ error: "كلمة المرور غير صحيحة" });
+        if (verifyPassword(password, storedHash)) {
+          isValid = true;
+          if (!storedHash.startsWith('scrypt$')) {
+            needsRehash = true;
+          }
         }
       } else if (legacyPassword && password === legacyPassword) {
-        // Legacy plain-text password match
-      } else if (bootstrapPassword && password === bootstrapPassword) {
-        // Accept bootstrap password for accounts without any stored password
-      } else {
+        isValid = true;
+        needsRehash = true;
+      } else if (bootstrapPassword && password === bootstrapPassword && !storedHash && !legacyPassword) {
+        isValid = true;
+        needsRehash = true;
+      }
+
+      if (!isValid) {
         return res.status(401).json({ error: "كلمة المرور غير صحيحة" });
       }
 
-      // Create session token
+      if (needsRehash) {
+        const newHash = hashPassword(password);
+        const updatedEmployee = { ...employee, passwordHash: newHash };
+        delete updatedEmployee.password;
+        await firestoreSetDocument("employees", employee.id, updatedEmployee);
+      }
+
       const sessionToken = createSessionToken(employee.id, employee.email);
-
       auditLog('auth_login', employee.id, employee.email, {});
-
       res.json({ sessionToken, employee });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // Server-side logout (invalidates token)
+  app.post("/api/auth/logout", (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      sessions.delete(token);
+    }
+    res.json({ ok: true });
   });
 
   // Server-side password change
@@ -566,30 +603,29 @@ async function startServer() {
       }
 
       const employee = req.employee;
-      const { createHash } = await import('crypto');
-
-      // Verify current password
       const storedHash = employee.passwordHash;
+      const legacyPassword = employee.password;
+      const bootstrapPassword = process.env.BOOTSTRAP_PASSWORD;
+
+      let currentValid = false;
       if (storedHash) {
-        const inputHash = createHash('sha256').update(currentPassword).digest('hex');
-        if (inputHash !== storedHash) {
-          return res.status(401).json({ error: "Current password is incorrect" });
-        }
-      } else {
-        // No stored hash — accept bootstrap password
-        const bootstrapPassword = process.env.BOOTSTRAP_PASSWORD;
-        if (!bootstrapPassword || currentPassword !== bootstrapPassword) {
-          return res.status(401).json({ error: "Current password is incorrect" });
-        }
+        currentValid = verifyPassword(currentPassword, storedHash);
+      } else if (legacyPassword && currentPassword === legacyPassword) {
+        currentValid = true;
+      } else if (bootstrapPassword && currentPassword === bootstrapPassword) {
+        currentValid = true;
       }
 
-      // Store new password hash
-      const newHash = createHash('sha256').update(newPassword).digest('hex');
+      if (!currentValid) {
+        return res.status(401).json({ error: "Current password is incorrect" });
+      }
+
+      const newHash = hashPassword(newPassword);
       const updatedEmployee = { ...employee, passwordHash: newHash };
+      delete updatedEmployee.password;
       await firestoreSetDocument("employees", employee.id, updatedEmployee);
 
       auditLog('auth_password_changed', employee.id, employee.email, {});
-
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -598,14 +634,13 @@ async function startServer() {
 
   // ---- Authenticated endpoints ----
 
-  // Migrate existing users to Firebase Auth (admin operation via REST API)
+  // Migrate existing users to Firebase Auth
   app.post("/api/admin/migrate-users", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
     try {
       if (!firebaseConfig?.apiKey) {
         return res.status(500).json({ error: "Firebase config not available" });
       }
 
-      // Get all employees from Firestore
       const token = await getGoogleAccessToken();
       const listResp = await fetch(
         `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/employees`,
@@ -629,25 +664,21 @@ async function startServer() {
         const oldId = docRef.name.split('/').pop();
         const fields = docRef.fields || {};
         
-        // Extract employee data
         const email = fields.email?.stringValue;
         const password = fields.password?.stringValue;
         const name = fields.name?.stringValue;
         
-        // Skip if already has a Firebase Auth UID (no password field means migrated)
         if (!password) {
           results.skipped.push({ id: oldId, reason: "No password field (already migrated)" });
           continue;
         }
         
-        // Skip if no email
         if (!email) {
           results.skipped.push({ id: oldId, reason: "No email address" });
           continue;
         }
 
         try {
-          // Create Firebase Auth user with the existing password
           const createResp = await fetch(
             `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`,
             {
@@ -662,7 +693,6 @@ async function startServer() {
           if (!createResp.ok) {
             const msg = createData?.error?.message || 'Failed to create user';
             if (msg === 'EMAIL_EXISTS') {
-              // User already exists in Firebase Auth, skip
               results.skipped.push({ id: oldId, reason: "Email already exists in Firebase Auth" });
               continue;
             }
@@ -671,8 +701,6 @@ async function startServer() {
           }
 
           const newUid = createData.localId;
-          
-          // Update employee document with new UID and remove password field
           const updatedEmployee = {
             id: newUid,
             name: name?.stringValue || 'Unknown',
@@ -680,16 +708,13 @@ async function startServer() {
             role: fields.role?.stringValue || '',
             type: fields.type?.stringValue || 'دوام كامل',
             salary: fields.salary?.integerValue ? parseInt(fields.salary.integerValue) : 0,
-            permissions: fields.permissions?.arrayValue?.values?.map((v: any) => v.stringValue) || ['pos']
+            permissions: fields.permissions?.arrayValue?.values?.map((v: any) => v.stringValue) || ['pos'],
+            passwordHash: hashPassword(password),
           };
 
-          // Create new document with new UID
           await firestoreSetDocument("employees", newUid, updatedEmployee);
-          
-          // Delete old document
           await firestoreDeleteDocument("employees", oldId);
           
-          // Update attendance records
           const attResp = await fetch(
             `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/attendance`,
             { headers: { Authorization: `Bearer ${token}` } }
@@ -705,7 +730,6 @@ async function startServer() {
               const attEmployeeId = attFields.employeeId?.stringValue;
               
               if (attEmployeeId === oldId) {
-                // Update attendance record with new UID
                 const updatedAtt = {
                   id: attId,
                   employeeId: newUid,
@@ -721,13 +745,11 @@ async function startServer() {
           }
 
           results.migrated.push({ oldId, newUid, email });
-          
         } catch (err: any) {
           results.errors.push({ id: oldId, error: err.message });
         }
       }
 
-      // Store migration tracking data
       try {
         await firestoreSetDocument('metadata', 'user_migration', {
           migrated: true,
@@ -752,7 +774,7 @@ async function startServer() {
     }
   });
 
-  // Delete user: removes Firestore data (employee + attendance). Auth deletion requires Admin SDK.
+  // Delete user
   app.post("/api/admin/delete-user", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
     try {
       const { uid } = req.body;
@@ -760,14 +782,12 @@ async function startServer() {
         return res.status(400).json({ error: "Missing or invalid uid" });
       }
 
-      // Prevent self-deletion
       if (uid === req.uid) {
         return res.status(400).json({ error: "Cannot delete your own account" });
       }
 
       const errors: string[] = [];
 
-      // 1. Delete attendance records for this user
       try {
         const token = await getGoogleAccessToken();
         const attResp = await fetch(
@@ -789,7 +809,6 @@ async function startServer() {
         errors.push(`Attendance cleanup: ${e.message}`);
       }
 
-      // 2. Delete employee document
       try {
         await firestoreDeleteDocument("employees", uid);
       } catch (e: any) {
@@ -806,14 +825,13 @@ async function startServer() {
         message: errors.length === 0
           ? "تم حذف المستخدم بنجاح"
           : `تم الحذف مع بعض الأخطاء: ${errors.join('; ')}`,
-        authDeletionNote: "تم تعطيل حساب المصادقة (حُذف سجل الموظف). لحذف حساب المصادقة بالكامل، استخدم Firebase Console > Authentication > Users.",
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  // Reset password via Firebase Auth (admin operation via REST API)
+  // Reset password via Firebase Auth
   app.post("/api/admin/reset-password", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
     try {
       const { email } = req.body;
@@ -854,7 +872,7 @@ async function startServer() {
     }
   });
 
-  // Create Firebase Auth user (admin operation via REST API)
+  // Create Firebase Auth user
   app.post("/api/admin/create-user", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
     try {
       const { email, password } = req.body;
@@ -940,7 +958,7 @@ async function startServer() {
       const { employeeId, employeeName } = req.body;
       if (!employeeId || !employeeName) return res.status(400).json({ error: "Missing employeeId or employeeName" });
 
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const id = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
       const now = new Date();
       const newSession = {
         id,
@@ -958,7 +976,7 @@ async function startServer() {
     }
   });
 
-  // ---- Gemini endpoints (Firebase Auth) ----
+  // ---- Gemini endpoints ----
 
   app.post("/api/gemini/suggest-price", requireFirebaseAuth, async (req: express.Request, res: express.Response) => {
     try {
@@ -1009,7 +1027,7 @@ async function startServer() {
     }
   });
 
-  // ---- Firestore proxy endpoints (require proxy auth + collection validation) ----
+  // ---- Firestore proxy endpoints ----
 
   app.post("/api/proxy/set", requireFirebaseAuth, async (req, res) => {
     try {
@@ -1042,7 +1060,6 @@ async function startServer() {
       if (collection === 'audit_logs') {
         return res.status(403).json({ error: "Cannot delete audit logs" });
       }
-      // Prevent self-deletion of employee record (would lock out the admin)
       if (collection === 'employees' && id === req.uid) {
         return res.status(403).json({ error: "Cannot delete your own employee record via proxy. Use /api/admin/delete-user instead." });
       }
@@ -1058,7 +1075,6 @@ async function startServer() {
     try {
       const { path: docPath } = req.body;
       if (!docPath || typeof docPath !== 'string') return res.status(400).json({ error: "Missing or invalid path" });
-      // Validate path format: must be "collection/documentId" (no traversal)
       const pathParts = docPath.split('/');
       if (pathParts.length !== 2 || !isValidCollection(pathParts[0]) || !isValidDocumentId(pathParts[1])) {
         return res.status(400).json({ error: "Invalid path format. Expected: collection/documentId" });
@@ -1076,7 +1092,6 @@ async function startServer() {
       if (!Array.isArray(writes) || writes.length === 0) return res.status(400).json({ error: "Missing or empty writes array" });
       if (writes.length > 500) return res.status(400).json({ error: "Batch size exceeds limit (max 500)" });
 
-      // Validate all writes before executing
       for (const w of writes) {
         if (!w.collection || !isValidCollection(w.collection)) {
           return res.status(403).json({ error: `Access denied: invalid collection "${w.collection}"` });
@@ -1087,20 +1102,16 @@ async function startServer() {
         if (w.type !== "set" && w.type !== "delete") {
           return res.status(400).json({ error: `Invalid write type: "${w.type}"` });
         }
-        // Server-side permission check for each write
         if (!hasWritePermission(req.employee, w.collection)) {
           return res.status(403).json({ error: `Access denied: missing permission for collection "${w.collection}"` });
         }
-        // Schema validation for set operations
         if (w.type === "set") {
           const validationError = validateProxyPayload(w.collection, w.id, w.data);
           if (validationError) return res.status(400).json({ error: `${w.collection}/${w.id}: ${validationError}` });
         }
-        // Block deletes to audit_logs
         if (w.type === "delete" && w.collection === 'audit_logs') {
           return res.status(403).json({ error: "Cannot delete audit logs" });
         }
-        // Prevent self-deletion of employee record
         if (w.type === "delete" && w.collection === 'employees' && w.id === req.uid) {
           return res.status(403).json({ error: "Cannot delete your own employee record via batch" });
         }
@@ -1128,432 +1139,420 @@ async function startServer() {
       res.status(500).json({ error: e.message });
     }
   });
-  // ---- Firestore batch commit helper (atomic multi-document writes via REST API) ----
 
-async function firestoreCommit(writes: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[]): Promise<void> {
-  if (writes.length === 0) return;
-  const token = await getGoogleAccessToken();
-  const batchBody: any = {
-    writes: writes.map(w => {
-      if (w.type === 'delete') {
-        return { delete: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}` };
-      }
-      const fields = jsToFirestoreValue(w.data || {}).mapValue.fields;
-      return { update: { name: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}`, fields } };
-    }),
-  };
-  const resp = await fetch(`https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents:commit`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(batchBody),
-  });
-  if (!resp.ok) throw new Error(`Firestore commit failed: ${resp.status} ${await resp.text()}`);
-}
+  // ---- Firestore batch commit helper ----
 
-// ---- Sales transaction endpoints ----
-
-app.post("/api/sales/create", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
-  try {
-    const { sale } = req.body;
-    if (!sale || typeof sale !== 'object') return res.status(400).json({ error: "Missing sale data" });
-    if (!sale.id || !isValidDocumentId(sale.id)) return res.status(400).json({ error: "Invalid sale ID" });
-    if (!sale.type || typeof sale.type !== 'string') return res.status(400).json({ error: "Missing or invalid type" });
-    if (!sale.date || typeof sale.date !== 'string') return res.status(400).json({ error: "Missing or invalid date" });
-    if (!Array.isArray(sale.items)) return res.status(400).json({ error: "Missing or invalid items" });
-    if (typeof sale.totalAmount !== 'number') return res.status(400).json({ error: "Missing or invalid totalAmount" });
-    if (typeof sale.profit !== 'number') return res.status(400).json({ error: "Missing or invalid profit" });
-    if (!sale.paymentMethod || typeof sale.paymentMethod !== 'string') return res.status(400).json({ error: "Missing or invalid paymentMethod" });
-    if (!sale.createdBy || typeof sale.createdBy !== 'string') return res.status(400).json({ error: "Missing or invalid createdBy" });
-    if (typeof sale.isPaid !== 'boolean') return res.status(400).json({ error: "Missing or invalid isPaid" });
-
-    // Validate stock availability for non-manual items
-    const stockItems = (sale.items as any[]).filter((i: any) => !i.isManualItem);
-    for (const item of stockItems) {
-      if (!item.id || typeof item.quantity !== 'number' || item.quantity <= 0) {
-        return res.status(400).json({ error: `Invalid stock item: ${JSON.stringify(item)}` });
-      }
-      const product = await firestoreGetDocument(`products/${item.id}`);
-      if (!product) return res.status(400).json({ error: `Product not found: ${item.id}` });
-      if (typeof product.stock !== 'number' || product.stock < item.quantity) {
-        return res.status(400).json({ error: `Insufficient stock for ${product.name || item.id}: available ${product.stock}, requested ${item.quantity}` });
-      }
-    }
-
-    // Build atomic commit
-    const writes: { type: 'set' | 'update'; collection: string; id: string; data: any }[] = [];
-    writes.push({ type: 'set', collection: 'sales', id: sale.id, data: sale });
-
-    // Stock adjustments
-    for (const item of stockItems) {
-      const product = await firestoreGetDocument(`products/${item.id}`);
-      if (!product) return res.status(400).json({ error: `Product not found: ${item.id}` });
-      writes.push({ type: 'set', collection: 'products', id: item.id, data: { ...product, stock: (product.stock || 0) - item.quantity } });
-    }
-
-    // Customer updates
-    if (sale.customerId) {
-      const customer = await firestoreGetDocument(`customers/${sale.customerId}`);
-      if (customer) {
-        const isDebt = sale.paymentMethod === 'آجل (دين)';
-        const totalPurchases = (customer.totalPurchases || 0) + sale.totalAmount;
-        const totalDebt = isDebt ? (customer.totalDebt || 0) + sale.totalAmount : (customer.totalDebt || 0);
-        const updatedCustomer = { ...customer, totalPurchases, totalDebt, lastPurchaseDate: new Date().toISOString() };
-        writes.push({ type: 'set', collection: 'customers', id: sale.customerId, data: updatedCustomer });
-      }
-    }
-
-    await firestoreCommit(writes);
-    await auditLog('sale_created', req.uid || '', req.employee?.email || '', { saleId: sale.id, totalAmount: sale.totalAmount, paymentMethod: sale.paymentMethod });
-    res.json({ ok: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
+  async function firestoreCommit(writes: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[]): Promise<void> {
+    if (writes.length === 0) return;
+    const token = await getGoogleAccessToken();
+    const batchBody: any = {
+      writes: writes.map(w => {
+        if (w.type === 'delete') {
+          return { delete: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}` };
+        }
+        const fields = jsToFirestoreValue(w.data || {}).mapValue.fields;
+        return { update: { name: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}`, fields } };
+      }),
+    };
+    const resp = await fetch(`https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents:commit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(batchBody),
+    });
+    if (!resp.ok) throw new Error(`Firestore commit failed: ${resp.status} ${await resp.text()}`);
   }
-});
 
-app.post("/api/sales/update", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
-  try {
-    const { sale } = req.body;
-    if (!sale || typeof sale !== 'object') return res.status(400).json({ error: "Missing sale data" });
-    if (!sale.id || !isValidDocumentId(sale.id)) return res.status(400).json({ error: "Invalid sale ID" });
+  // ---- Sales transaction endpoints ----
 
-    const oldSale = await firestoreGetDocument(`sales/${sale.id}`);
-    if (!oldSale) return res.status(404).json({ error: "Sale not found" });
+  app.post("/api/sales/create", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+    try {
+      const { sale } = req.body;
+      if (!sale || typeof sale !== 'object') return res.status(400).json({ error: "Missing sale data" });
+      if (!sale.id || !isValidDocumentId(sale.id)) return res.status(400).json({ error: "Invalid sale ID" });
+      if (!sale.type || typeof sale.type !== 'string') return res.status(400).json({ error: "Missing or invalid type" });
+      if (!sale.date || typeof sale.date !== 'string') return res.status(400).json({ error: "Missing or invalid date" });
+      if (!Array.isArray(sale.items)) return res.status(400).json({ error: "Missing or invalid items" });
+      if (typeof sale.totalAmount !== 'number') return res.status(400).json({ error: "Missing or invalid totalAmount" });
+      if (typeof sale.profit !== 'number') return res.status(400).json({ error: "Missing or invalid profit" });
+      if (!sale.paymentMethod || typeof sale.paymentMethod !== 'string') return res.status(400).json({ error: "Missing or invalid paymentMethod" });
+      if (!sale.createdBy || typeof sale.createdBy !== 'string') return res.status(400).json({ error: "Missing or invalid createdBy" });
+      if (typeof sale.isPaid !== 'boolean') return res.status(400).json({ error: "Missing or invalid isPaid" });
 
-    const writes: { type: 'set' | 'update'; collection: string; id: string; data: any }[] = [];
-    writes.push({ type: 'set', collection: 'sales', id: sale.id, data: sale });
-
-    // Reverse old stock, apply new stock
-    const oldStockItems = (oldSale.items as any[]).filter((i: any) => !i.isManualItem);
-    const newStockItems = (sale.items as any[]).filter((i: any) => !i.isManualItem);
-
-    for (const item of oldStockItems) {
-      const product = await firestoreGetDocument(`products/${item.id}`);
-      if (product) {
-        writes.push({ type: 'set', collection: 'products', id: item.id, data: { ...product, stock: (product.stock || 0) + item.quantity } });
+      const stockItems = (sale.items as any[]).filter((i: any) => !i.isManualItem);
+      for (const item of stockItems) {
+        if (!item.id || typeof item.quantity !== 'number' || item.quantity <= 0) {
+          return res.status(400).json({ error: `Invalid stock item: ${JSON.stringify(item)}` });
+        }
+        const product = await firestoreGetDocument(`products/${item.id}`);
+        if (!product) return res.status(400).json({ error: `Product not found: ${item.id}` });
+        if (typeof product.stock !== 'number' || product.stock < item.quantity) {
+          return res.status(400).json({ error: `Insufficient stock for ${product.name || item.id}: available ${product.stock}, requested ${item.quantity}` });
+        }
       }
-    }
-    for (const item of newStockItems) {
-      const product = await firestoreGetDocument(`products/${item.id}`);
-      if (product) {
+
+      const writes: { type: 'set' | 'update'; collection: string; id: string; data: any }[] = [];
+      writes.push({ type: 'set', collection: 'sales', id: sale.id, data: sale });
+
+      for (const item of stockItems) {
+        const product = await firestoreGetDocument(`products/${item.id}`);
+        if (!product) return res.status(400).json({ error: `Product not found: ${item.id}` });
         writes.push({ type: 'set', collection: 'products', id: item.id, data: { ...product, stock: (product.stock || 0) - item.quantity } });
       }
-    }
 
-    await firestoreCommit(writes);
-    await auditLog('sale_updated', req.uid || '', req.employee?.email || '', { saleId: sale.id });
-    res.json({ ok: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/sales/delete", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
-  try {
-    const { id } = req.body;
-    if (!id || !isValidDocumentId(id)) return res.status(400).json({ error: "Missing or invalid sale ID" });
-
-    const sale = await firestoreGetDocument(`sales/${id}`);
-    if (!sale) return res.status(404).json({ error: "Sale not found" });
-
-    const writes: { type: 'set' | 'delete'; collection: string; id: string; data?: any }[] = [];
-    writes.push({ type: 'delete', collection: 'sales', id });
-
-    // Restore stock (reverse the sale)
-    const stockMultiplier = sale.type === 'مرتجع' ? -1 : 1;
-    const stockItems = (sale.items as any[]).filter((i: any) => !i.isManualItem);
-    for (const item of stockItems) {
-      const product = await firestoreGetDocument(`products/${item.id}`);
-      if (product) {
-        writes.push({ type: 'set', collection: 'products', id: item.id, data: { ...product, stock: (product.stock || 0) + item.quantity * stockMultiplier } });
-      }
-    }
-
-    // Customer adjustments
-    if (sale.customerId) {
-      const customer = await firestoreGetDocument(`customers/${sale.customerId}`);
-      if (customer) {
-        let debtAdjustment = 0;
-        if (sale.paymentMethod === 'آجل (دين)' && !sale.isPaid) {
-          debtAdjustment = -(sale.totalAmount || 0);
+      if (sale.customerId) {
+        const customer = await firestoreGetDocument(`customers/${sale.customerId}`);
+        if (customer) {
+          const isDebt = sale.paymentMethod === 'آجل (دين)';
+          const totalPurchases = (customer.totalPurchases || 0) + sale.totalAmount;
+          const totalDebt = isDebt ? (customer.totalDebt || 0) + sale.totalAmount : (customer.totalDebt || 0);
+          const updatedCustomer = { ...customer, totalPurchases, totalDebt, lastPurchaseDate: new Date().toISOString() };
+          writes.push({ type: 'set', collection: 'customers', id: sale.customerId, data: updatedCustomer });
         }
-        const totalPurchases = (customer.totalPurchases || 0) - (sale.totalAmount || 0);
-        const totalDebt = (customer.totalDebt || 0) + debtAdjustment;
-        const updatedCustomer = { ...customer, totalPurchases, totalDebt };
-        writes.push({ type: 'set', collection: 'customers', id: sale.customerId, data: updatedCustomer });
       }
+
+      await firestoreCommit(writes);
+      await auditLog('sale_created', req.uid || '', req.employee?.email || '', { saleId: sale.id, totalAmount: sale.totalAmount, paymentMethod: sale.paymentMethod });
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
+  });
 
-    await firestoreCommit(writes);
-    await auditLog('sale_deleted', req.uid || '', req.employee?.email || '', { saleId: id });
-    res.json({ ok: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
+  app.post("/api/sales/update", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+    try {
+      const { sale } = req.body;
+      if (!sale || typeof sale !== 'object') return res.status(400).json({ error: "Missing sale data" });
+      if (!sale.id || !isValidDocumentId(sale.id)) return res.status(400).json({ error: "Invalid sale ID" });
 
-app.post("/api/sales/reschedule-debt", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
-  try {
-    const { saleId, newDate } = req.body;
-    if (!saleId || !isValidDocumentId(saleId)) return res.status(400).json({ error: "Missing or invalid sale ID" });
-    if (!newDate || typeof newDate !== 'string') return res.status(400).json({ error: "Missing or invalid new date" });
+      const oldSale = await firestoreGetDocument(`sales/${sale.id}`);
+      if (!oldSale) return res.status(404).json({ error: "Sale not found" });
 
-    const sale = await firestoreGetDocument(`sales/${saleId}`);
-    if (!sale) return res.status(404).json({ error: "Sale not found" });
+      const writes: { type: 'set' | 'update'; collection: string; id: string; data: any }[] = [];
+      writes.push({ type: 'set', collection: 'sales', id: sale.id, data: sale });
 
-    const updatedSale = { ...sale, dueDate: new Date(newDate).toISOString() };
-    await firestoreSetDocument('sales', saleId, updatedSale);
-    await auditLog('sale_debt_rescheduled', req.uid || '', req.employee?.email || '', { saleId, newDate });
-    res.json({ ok: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
+      const oldStockItems = (oldSale.items as any[]).filter((i: any) => !i.isManualItem);
+      const newStockItems = (sale.items as any[]).filter((i: any) => !i.isManualItem);
 
-app.post("/api/sales/settle-debt", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
-  try {
-    const { saleId } = req.body;
-    if (!saleId || !isValidDocumentId(saleId)) return res.status(400).json({ error: "Missing or invalid sale ID" });
-
-    const sale = await firestoreGetDocument(`sales/${saleId}`);
-    if (!sale) return res.status(404).json({ error: "Sale not found" });
-    if (sale.isPaid) return res.status(400).json({ error: "Sale is already settled" });
-
-    const updatedSale = { ...sale, isPaid: true, paidAt: new Date().toISOString() };
-    const writes: { type: 'set'; collection: string; id: string; data: any }[] = [];
-    writes.push({ type: 'set', collection: 'sales', id: saleId, data: updatedSale });
-
-    // Clear customer debt
-    if (sale.customerId) {
-      const customer = await firestoreGetDocument(`customers/${sale.customerId}`);
-      if (customer) {
-        const totalDebt = (customer.totalDebt || 0) - (sale.totalAmount || 0);
-        const updatedCustomer = { ...customer, totalDebt: Math.max(0, totalDebt) };
-        writes.push({ type: 'set', collection: 'customers', id: sale.customerId, data: updatedCustomer });
-      }
-    }
-
-    await firestoreCommit(writes);
-    await auditLog('sale_debt_settled', req.uid || '', req.employee?.email || '', { saleId, totalAmount: sale.totalAmount });
-    res.json({ ok: true });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/sales/return", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
-  try {
-    const { originalSale, user } = req.body;
-    if (!originalSale || typeof originalSale !== 'object') return res.status(400).json({ error: "Missing original sale data" });
-    if (!originalSale.id || !isValidDocumentId(originalSale.id)) return res.status(400).json({ error: "Invalid original sale ID" });
-
-    const existingSale = await firestoreGetDocument(`sales/${originalSale.id}`);
-    if (!existingSale) return res.status(404).json({ error: "Original sale not found" });
-
-    const returnId = `R-${crypto.randomUUID()}`;
-    const returnSale = {
-      id: returnId,
-      type: 'مرتجع',
-      date: new Date().toISOString(),
-      items: originalSale.items,
-      totalAmount: -Math.abs(originalSale.totalAmount),
-      profit: -Math.abs(originalSale.profit),
-      paymentMethod: originalSale.paymentMethod,
-      createdBy: user || req.employee?.email || 'مجهول',
-      customerId: originalSale.customerId || '',
-      customerName: originalSale.customerName || '',
-      originalSaleId: originalSale.id,
-      isPaid: true,
-    };
-
-    const writes: { type: 'set'; collection: string; id: string; data: any }[] = [];
-    writes.push({ type: 'set', collection: 'sales', id: returnId, data: returnSale });
-
-    // Restore stock
-    const stockItems = (originalSale.items as any[]).filter((i: any) => !i.isManualItem);
-    for (const item of stockItems) {
-      const product = await firestoreGetDocument(`products/${item.id}`);
-      if (product) {
-        writes.push({ type: 'set', collection: 'products', id: item.id, data: { ...product, stock: (product.stock || 0) + item.quantity } });
-      }
-    }
-
-    // Customer adjustments
-    if (originalSale.customerId) {
-      const customer = await firestoreGetDocument(`customers/${originalSale.customerId}`);
-      if (customer) {
-        let debtAdjustment = 0;
-        if (originalSale.paymentMethod === 'آجل (دين)' && !originalSale.isPaid) {
-          debtAdjustment = -(originalSale.totalAmount || 0);
+      for (const item of oldStockItems) {
+        const product = await firestoreGetDocument(`products/${item.id}`);
+        if (product) {
+          writes.push({ type: 'set', collection: 'products', id: item.id, data: { ...product, stock: (product.stock || 0) + item.quantity } });
         }
-        const totalPurchases = (customer.totalPurchases || 0) - (originalSale.totalAmount || 0);
-        const totalDebt = (customer.totalDebt || 0) + debtAdjustment;
-        const updatedCustomer = { ...customer, totalPurchases, totalDebt: Math.max(0, totalDebt) };
-        writes.push({ type: 'set', collection: 'customers', id: originalSale.customerId, data: updatedCustomer });
       }
+      for (const item of newStockItems) {
+        const product = await firestoreGetDocument(`products/${item.id}`);
+        if (product) {
+          writes.push({ type: 'set', collection: 'products', id: item.id, data: { ...product, stock: (product.stock || 0) - item.quantity } });
+        }
+      }
+
+      await firestoreCommit(writes);
+      await auditLog('sale_updated', req.uid || '', req.employee?.email || '', { saleId: sale.id });
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
+  });
 
-    await firestoreCommit(writes);
-    await auditLog('sale_returned', req.uid || '', req.employee?.email || '', { returnId, originalSaleId: originalSale.id, totalAmount: originalSale.totalAmount });
-    res.json({ ok: true, returnId });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
+  app.post("/api/sales/delete", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+    try {
+      const { id } = req.body;
+      if (!id || !isValidDocumentId(id)) return res.status(400).json({ error: "Missing or invalid sale ID" });
 
-// ---- Backup operation endpoints (admin only) ----
+      const sale = await firestoreGetDocument(`sales/${id}`);
+      if (!sale) return res.status(404).json({ error: "Sale not found" });
 
-app.post("/api/backup/restore", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
-  try {
-    const { data } = req.body;
-    if (!data || typeof data !== 'object') return res.status(400).json({ error: "Missing backup data" });
+      const writes: { type: 'set' | 'delete'; collection: string; id: string; data?: any }[] = [];
+      writes.push({ type: 'delete', collection: 'sales', id });
 
-    await auditLog('backup_restore_started', req.uid || '', req.employee?.email || '', {});
+      const stockMultiplier = sale.type === 'مرتجع' ? -1 : 1;
+      const stockItems = (sale.items as any[]).filter((i: any) => !i.isManualItem);
+      for (const item of stockItems) {
+        const product = await firestoreGetDocument(`products/${item.id}`);
+        if (product) {
+          writes.push({ type: 'set', collection: 'products', id: item.id, data: { ...product, stock: (product.stock || 0) + item.quantity * stockMultiplier } });
+        }
+      }
 
-    // Clear existing data first
-    const collectionsToClear = ['products', 'sales', 'expenses', 'employees', 'customers', 'suppliers', 'attendance', 'categories', 'seasons', 'metadata'];
-    for (const coll of collectionsToClear) {
+      if (sale.customerId) {
+        const customer = await firestoreGetDocument(`customers/${sale.customerId}`);
+        if (customer) {
+          let debtAdjustment = 0;
+          if (sale.paymentMethod === 'آجل (دين)' && !sale.isPaid) {
+            debtAdjustment = -(sale.totalAmount || 0);
+          }
+          const totalPurchases = (customer.totalPurchases || 0) - (sale.totalAmount || 0);
+          const totalDebt = (customer.totalDebt || 0) + debtAdjustment;
+          const updatedCustomer = { ...customer, totalPurchases, totalDebt };
+          writes.push({ type: 'set', collection: 'customers', id: sale.customerId, data: updatedCustomer });
+        }
+      }
+
+      await firestoreCommit(writes);
+      await auditLog('sale_deleted', req.uid || '', req.employee?.email || '', { saleId: id });
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/sales/reschedule-debt", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+    try {
+      const { saleId, newDate } = req.body;
+      if (!saleId || !isValidDocumentId(saleId)) return res.status(400).json({ error: "Missing or invalid sale ID" });
+      if (!newDate || typeof newDate !== 'string') return res.status(400).json({ error: "Missing or invalid new date" });
+
+      const sale = await firestoreGetDocument(`sales/${saleId}`);
+      if (!sale) return res.status(404).json({ error: "Sale not found" });
+
+      const updatedSale = { ...sale, dueDate: new Date(newDate).toISOString() };
+      await firestoreSetDocument('sales', saleId, updatedSale);
+      await auditLog('sale_debt_rescheduled', req.uid || '', req.employee?.email || '', { saleId, newDate });
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/sales/settle-debt", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+    try {
+      const { saleId } = req.body;
+      if (!saleId || !isValidDocumentId(saleId)) return res.status(400).json({ error: "Missing or invalid sale ID" });
+
+      const sale = await firestoreGetDocument(`sales/${saleId}`);
+      if (!sale) return res.status(404).json({ error: "Sale not found" });
+      if (sale.isPaid) return res.status(400).json({ error: "Sale is already settled" });
+
+      const updatedSale = { ...sale, isPaid: true, paidAt: new Date().toISOString() };
+      const writes: { type: 'set'; collection: string; id: string; data: any }[] = [];
+      writes.push({ type: 'set', collection: 'sales', id: saleId, data: updatedSale });
+
+      if (sale.customerId) {
+        const customer = await firestoreGetDocument(`customers/${sale.customerId}`);
+        if (customer) {
+          const totalDebt = (customer.totalDebt || 0) - (sale.totalAmount || 0);
+          const updatedCustomer = { ...customer, totalDebt: Math.max(0, totalDebt) };
+          writes.push({ type: 'set', collection: 'customers', id: sale.customerId, data: updatedCustomer });
+        }
+      }
+
+      await firestoreCommit(writes);
+      await auditLog('sale_debt_settled', req.uid || '', req.employee?.email || '', { saleId, totalAmount: sale.totalAmount });
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/sales/return", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+    try {
+      const { originalSale, user } = req.body;
+      if (!originalSale || typeof originalSale !== 'object') return res.status(400).json({ error: "Missing original sale data" });
+      if (!originalSale.id || !isValidDocumentId(originalSale.id)) return res.status(400).json({ error: "Invalid original sale ID" });
+
+      const existingSale = await firestoreGetDocument(`sales/${originalSale.id}`);
+      if (!existingSale) return res.status(404).json({ error: "Original sale not found" });
+
+      const returnId = `R-${crypto.randomUUID()}`;
+      const returnSale = {
+        id: returnId,
+        type: 'مرتجع',
+        date: new Date().toISOString(),
+        items: originalSale.items,
+        totalAmount: -Math.abs(originalSale.totalAmount),
+        profit: -Math.abs(originalSale.profit),
+        paymentMethod: originalSale.paymentMethod,
+        createdBy: user || req.employee?.email || 'مجهول',
+        customerId: originalSale.customerId || '',
+        customerName: originalSale.customerName || '',
+        originalSaleId: originalSale.id,
+        isPaid: true,
+      };
+
+      const writes: { type: 'set'; collection: string; id: string; data: any }[] = [];
+      writes.push({ type: 'set', collection: 'sales', id: returnId, data: returnSale });
+
+      const stockItems = (originalSale.items as any[]).filter((i: any) => !i.isManualItem);
+      for (const item of stockItems) {
+        const product = await firestoreGetDocument(`products/${item.id}`);
+        if (product) {
+          writes.push({ type: 'set', collection: 'products', id: item.id, data: { ...product, stock: (product.stock || 0) + item.quantity } });
+        }
+      }
+
+      if (originalSale.customerId) {
+        const customer = await firestoreGetDocument(`customers/${originalSale.customerId}`);
+        if (customer) {
+          let debtAdjustment = 0;
+          if (originalSale.paymentMethod === 'آجل (دين)' && !originalSale.isPaid) {
+            debtAdjustment = -(originalSale.totalAmount || 0);
+          }
+          const totalPurchases = (customer.totalPurchases || 0) - (originalSale.totalAmount || 0);
+          const totalDebt = (customer.totalDebt || 0) + debtAdjustment;
+          const updatedCustomer = { ...customer, totalPurchases, totalDebt: Math.max(0, totalDebt) };
+          writes.push({ type: 'set', collection: 'customers', id: originalSale.customerId, data: updatedCustomer });
+        }
+      }
+
+      await firestoreCommit(writes);
+      await auditLog('sale_returned', req.uid || '', req.employee?.email || '', { returnId, originalSaleId: originalSale.id, totalAmount: originalSale.totalAmount });
+      res.json({ ok: true, returnId });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- Backup operation endpoints (admin only) ----
+
+  app.post("/api/backup/restore", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
+    try {
+      const { data } = req.body;
+      if (!data || typeof data !== 'object') return res.status(400).json({ error: "Missing backup data" });
+
+      await auditLog('backup_restore_started', req.uid || '', req.employee?.email || '', {});
+
+      const collectionsToClear = ['products', 'sales', 'expenses', 'employees', 'customers', 'suppliers', 'attendance', 'categories', 'seasons', 'metadata'];
+      for (const coll of collectionsToClear) {
+        const token = await getGoogleAccessToken();
+        const listResp = await fetch(
+          `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${coll}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (listResp.ok) {
+          const listData = await listResp.json() as any;
+          const docs = listData.documents || [];
+          if (docs.length > 0) {
+            const deleteWrites = docs.map((d: any) => ({
+              type: 'delete' as const, collection: coll, id: d.name.split('/').pop()
+            }));
+            await firestoreCommit(deleteWrites);
+          }
+        }
+      }
+
+      const writeArrayData = async (items: any[], collectionName: string) => {
+        if (!Array.isArray(items)) return;
+        const writes: { type: 'set'; collection: string; id: string; data: any }[] = [];
+        for (const item of items) {
+          if (item && item.id && isValidDocumentId(item.id)) {
+            writes.push({ type: 'set', collection: collectionName, id: item.id, data: item });
+          }
+        }
+        for (let i = 0; i < writes.length; i += 450) {
+          await firestoreCommit(writes.slice(i, i + 450));
+        }
+      };
+
+      await writeArrayData(data.products, 'products');
+      await writeArrayData(data.sales, 'sales');
+      await writeArrayData(data.expenses, 'expenses');
+      await writeArrayData(data.employees, 'employees');
+      await writeArrayData(data.customers, 'customers');
+      await writeArrayData(data.attendance, 'attendance');
+      await writeArrayData(data.suppliers, 'suppliers');
+
+      if (Array.isArray(data.categories)) {
+        await firestoreSetDocument('categories', 'all', { items: data.categories });
+      }
+      if (Array.isArray(data.seasons)) {
+        await firestoreSetDocument('seasons', 'all', { items: data.seasons });
+      }
+
+      await auditLog('backup_restore_completed', req.uid || '', req.employee?.email || '', {});
+      res.json({ ok: true });
+    } catch (e: any) {
+      await auditLog('backup_restore_failed', req.uid || '', req.employee?.email || '', { error: e.message });
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/backup/clear", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
+    try {
+      await auditLog('data_clear_requested', req.uid || '', req.employee?.email || '', {});
+
+      const collectionsToClear = ['products', 'sales', 'expenses', 'employees', 'customers', 'suppliers', 'attendance', 'categories', 'seasons', 'metadata'];
+      for (const coll of collectionsToClear) {
+        const token = await getGoogleAccessToken();
+        const listResp = await fetch(
+          `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${coll}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (listResp.ok) {
+          const listData = await listResp.json() as any;
+          const docs = listData.documents || [];
+          if (docs.length > 0) {
+            const deleteWrites = docs.map((d: any) => ({
+              type: 'delete' as const, collection: coll, id: d.name.split('/').pop()
+            }));
+            await firestoreCommit(deleteWrites);
+          }
+        }
+      }
+
+      await auditLog('data_clear_completed', req.uid || '', req.employee?.email || '', {});
+      res.json({ ok: true });
+    } catch (e: any) {
+      await auditLog('data_clear_failed', req.uid || '', req.employee?.email || '', { error: e.message });
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/backup/migrate", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
+    try {
+      const { data } = req.body;
+      if (!data || typeof data !== 'object') return res.status(400).json({ error: "Missing migration data" });
+
       const token = await getGoogleAccessToken();
-      const listResp = await fetch(
-        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${coll}`,
+      const metaResp = await fetch(
+        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/metadata/migration_status`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      if (listResp.ok) {
-        const listData = await listResp.json() as any;
-        const docs = listData.documents || [];
-        if (docs.length > 0) {
-          const deleteWrites = docs.map((d: any) => ({
-            type: 'delete' as const, collection: coll, id: d.name.split('/').pop()
-          }));
-          await firestoreCommit(deleteWrites);
+      if (metaResp.ok) {
+        const metaData = await metaResp.json() as any;
+        const migrated = metaData.fields?.migrated?.booleanValue;
+        if (migrated) return res.json({ ok: false, message: "Already migrated" });
+      }
+
+      await auditLog('migration_started', req.uid || '', req.employee?.email || '', {});
+
+      const writeArrayData = async (items: any[], collectionName: string) => {
+        if (!Array.isArray(items)) return;
+        const writes: { type: 'set'; collection: string; id: string; data: any }[] = [];
+        for (const item of items) {
+          if (item && item.id && isValidDocumentId(item.id)) {
+            writes.push({ type: 'set', collection: collectionName, id: item.id, data: item });
+          }
         }
-      }
-    }
-
-    // Restore collections from backup
-    const writeArrayData = async (items: any[], collectionName: string) => {
-      if (!Array.isArray(items)) return;
-      const writes: { type: 'set'; collection: string; id: string; data: any }[] = [];
-      for (const item of items) {
-        if (item && item.id && isValidDocumentId(item.id)) {
-          writes.push({ type: 'set', collection: collectionName, id: item.id, data: item });
+        for (let i = 0; i < writes.length; i += 450) {
+          await firestoreCommit(writes.slice(i, i + 450));
         }
+      };
+
+      await writeArrayData(data.products, 'products');
+      await writeArrayData(data.sales, 'sales');
+      await writeArrayData(data.expenses, 'expenses');
+      await writeArrayData(data.employees, 'employees');
+      await writeArrayData(data.customers, 'customers');
+      await writeArrayData(data.suppliers, 'suppliers');
+      await writeArrayData(data.attendance, 'attendance');
+
+      if (Array.isArray(data.categories)) {
+        await firestoreSetDocument('categories', 'all', { items: data.categories });
       }
-      // Process in chunks of 450 to avoid batch limits
-      for (let i = 0; i < writes.length; i += 450) {
-        await firestoreCommit(writes.slice(i, i + 450));
+      if (Array.isArray(data.seasons)) {
+        await firestoreSetDocument('seasons', 'all', { items: data.seasons });
       }
-    };
 
-    await writeArrayData(data.products, 'products');
-    await writeArrayData(data.sales, 'sales');
-    await writeArrayData(data.expenses, 'expenses');
-    await writeArrayData(data.employees, 'employees');
-    await writeArrayData(data.customers, 'customers');
-    await writeArrayData(data.attendance, 'attendance');
-    await writeArrayData(data.suppliers, 'suppliers');
-
-    if (Array.isArray(data.categories)) {
-      await firestoreSetDocument('categories', 'all', { items: data.categories });
+      await firestoreSetDocument('metadata', 'migration_status', { migrated: true, timestamp: new Date().toISOString() });
+      await auditLog('migration_completed', req.uid || '', req.employee?.email || '', {});
+      res.json({ ok: true });
+    } catch (e: any) {
+      await auditLog('migration_failed', req.uid || '', req.employee?.email || '', { error: e.message });
+      res.status(500).json({ error: e.message });
     }
-    if (Array.isArray(data.seasons)) {
-      await firestoreSetDocument('seasons', 'all', { items: data.seasons });
-    }
+  });
 
-    await auditLog('backup_restore_completed', req.uid || '', req.employee?.email || '', {});
-    res.json({ ok: true });
-  } catch (e: any) {
-    await auditLog('backup_restore_failed', req.uid || '', req.employee?.email || '', { error: e.message });
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/backup/clear", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
-  try {
-    await auditLog('data_clear_requested', req.uid || '', req.employee?.email || '', {});
-
-    const collectionsToClear = ['products', 'sales', 'expenses', 'employees', 'customers', 'suppliers', 'attendance', 'categories', 'seasons', 'metadata'];
-    for (const coll of collectionsToClear) {
-      const token = await getGoogleAccessToken();
-      const listResp = await fetch(
-        `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/${coll}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (listResp.ok) {
-        const listData = await listResp.json() as any;
-        const docs = listData.documents || [];
-        if (docs.length > 0) {
-          const deleteWrites = docs.map((d: any) => ({
-            type: 'delete' as const, collection: coll, id: d.name.split('/').pop()
-          }));
-          await firestoreCommit(deleteWrites);
-        }
-      }
-    }
-
-    await auditLog('data_clear_completed', req.uid || '', req.employee?.email || '', {});
-    res.json({ ok: true });
-  } catch (e: any) {
-    await auditLog('data_clear_failed', req.uid || '', req.employee?.email || '', { error: e.message });
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/backup/migrate", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
-  try {
-    const { data } = req.body;
-    if (!data || typeof data !== 'object') return res.status(400).json({ error: "Missing migration data" });
-
-    const token = await getGoogleAccessToken();
-    const metaResp = await fetch(
-      `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}/documents/metadata/migration_status`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (metaResp.ok) {
-      const metaData = await metaResp.json() as any;
-      const migrated = metaData.fields?.migrated?.booleanValue;
-      if (migrated) return res.json({ ok: false, message: "Already migrated" });
-    }
-
-    await auditLog('migration_started', req.uid || '', req.employee?.email || '', {});
-
-    const writeArrayData = async (items: any[], collectionName: string) => {
-      if (!Array.isArray(items)) return;
-      const writes: { type: 'set'; collection: string; id: string; data: any }[] = [];
-      for (const item of items) {
-        if (item && item.id && isValidDocumentId(item.id)) {
-          writes.push({ type: 'set', collection: collectionName, id: item.id, data: item });
-        }
-      }
-      for (let i = 0; i < writes.length; i += 450) {
-        await firestoreCommit(writes.slice(i, i + 450));
-      }
-    };
-
-    await writeArrayData(data.products, 'products');
-    await writeArrayData(data.sales, 'sales');
-    await writeArrayData(data.expenses, 'expenses');
-    await writeArrayData(data.employees, 'employees');
-    await writeArrayData(data.customers, 'customers');
-    await writeArrayData(data.suppliers, 'suppliers');
-    await writeArrayData(data.attendance, 'attendance');
-
-    if (Array.isArray(data.categories)) {
-      await firestoreSetDocument('categories', 'all', { items: data.categories });
-    }
-    if (Array.isArray(data.seasons)) {
-      await firestoreSetDocument('seasons', 'all', { items: data.seasons });
-    }
-
-    await firestoreSetDocument('metadata', 'migration_status', { migrated: true, timestamp: new Date().toISOString() });
-    await auditLog('migration_completed', req.uid || '', req.employee?.email || '', {});
-    res.json({ ok: true });
-  } catch (e: any) {
-    await auditLog('migration_failed', req.uid || '', req.employee?.email || '', { error: e.message });
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ---- end proxy endpoints ----
+  // ---- end proxy endpoints ----
 
   const isProd = process.env.NODE_ENV === "production";
   if (!isProd) {

@@ -28,184 +28,62 @@ service cloud.firestore {
       );
     }
 
-    // ── Validation helpers ──
-
-    function incoming() {
-      return request.resource.data;
-    }
-
-    function existing() {
-      return resource.data;
-    }
-
-    function isValidProduct(data) {
-      return data.keys().hasAll(['id', 'name', 'sellingPrice', 'stock']) &&
-        data.id is string && data.id.size() <= 128 &&
-        data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
-        (data.get('purchasePrice', 0) is number || data.get('costPrice', 0) is number) &&
-        (data.get('purchasePrice', -1) >= 0 || data.get('costPrice', -1) >= 0) &&
-        data.sellingPrice is number && data.sellingPrice >= 0 &&
-        data.stock is number && data.stock >= 0 &&
-        (data.get('barcode', '') is string) && (data.get('barcode', '').size() <= 100) &&
-        (data.get('categoryId', '') is string) && (data.get('categoryId', '').size() <= 128) &&
-        (data.get('categoryName', '') is string) && (data.get('categoryName', '').size() <= 100) &&
-        (data.get('seasonId', '') is string) && (data.get('seasonId', '').size() <= 128) &&
-        (data.get('seasonName', '') is string) && (data.get('seasonName', '').size() <= 100) &&
-        (data.get('color', '') is string) && (data.get('color', '').size() <= 50) &&
-        (data.get('size', '') is string) && (data.get('size', '').size() <= 50) &&
-        (data.get('minStock', 0) is number) && (data.get('minStock', 0) >= 0) &&
-        (data.get('supplierId', '') is string) && (data.get('supplierId', '').size() <= 128) &&
-        (data.get('supplierName', '') is string) && (data.get('supplierName', '').size() <= 100);
-    }
-
-    function isValidSale(data) {
-      return data.keys().hasAll(['id', 'type', 'date', 'items', 'totalAmount', 'profit', 'paymentMethod', 'createdBy', 'isPaid']) &&
-        data.id is string && data.id.size() <= 128 &&
-        data.type is string && data.type.size() <= 20 &&
-        data.date is string && data.date.size() <= 50 &&
-        data.items is list && data.items.size() >= 0 && data.items.size() <= 500 &&
-        data.totalAmount is number &&
-        data.profit is number &&
-        data.paymentMethod is string && data.paymentMethod.size() <= 50 &&
-        data.createdBy is string && data.createdBy.size() <= 100 &&
-        data.isPaid is bool &&
-        (data.get('customerId', '') is string) && (data.get('customerId', '').size() <= 128) &&
-        (data.get('customerName', '') is string) && (data.get('customerName', '').size() <= 100) &&
-        (data.get('originalSaleId', '') is string) && (data.get('originalSaleId', '').size() <= 128) &&
-        (data.get('dueDate', '') is string) && (data.get('dueDate', '').size() <= 50) &&
-        (data.get('paidAt', '') is string) && (data.get('paidAt', '').size() <= 50);
-    }
-
-    function isValidExpense(data) {
-      return data.keys().hasAll(['id', 'description', 'amount', 'date', 'category']) &&
-        data.id is string && data.id.size() <= 128 &&
-        data.description is string && data.description.size() <= 500 &&
-        data.amount is number && data.amount > 0 &&
-        data.date is string && data.date.size() <= 50 &&
-        data.category is string && data.category.size() <= 100;
-    }
-
-    function isValidEmployee(data) {
-      return data.keys().hasAll(['id', 'name', 'email', 'role', 'type', 'salary', 'permissions']) &&
-        data.id is string && data.id.size() <= 128 &&
-        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
-        data.email is string && data.email.size() > 0 && data.email.size() <= 150 &&
-        data.role is string && data.role.size() <= 100 &&
-        data.type is string && data.type.size() <= 50 &&
-        data.salary is number && data.salary >= 0 &&
-        data.permissions is list && data.permissions.size() >= 0 && data.permissions.size() <= 50;
-    }
-
-    function isValidCustomer(data) {
-      return data.keys().hasAll(['id', 'name']) &&
-        data.id is string && data.id.size() <= 128 &&
-        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
-        (data.get('phone', '') is string) && (data.get('phone', '').size() <= 20) &&
-        (data.get('totalPurchases', 0) is number) &&
-        (data.get('totalDebt', 0) is number) &&
-        (data.get('lastPurchaseDate', '') is string) && (data.get('lastPurchaseDate', '').size() <= 50);
-    }
-
-    function isValidSupplier(data) {
-       return data.keys().hasAll(['id', 'name']) &&
-        data.id is string && data.id.size() <= 128 &&
-        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
-        (data.get('phone', '') is string) && (data.get('phone', '').size() <= 20) &&
-        (data.get('company', '') is string) && (data.get('company', '').size() <= 100);
-    }
-
-    function isValidAttendance(data) {
-      return data.keys().hasAll(['id', 'employeeId', 'employeeName', 'date', 'checkInTime']) &&
-        data.id is string && data.id.size() <= 128 &&
-        data.employeeId is string && data.employeeId.size() <= 128 &&
-        data.employeeName is string && data.employeeName.size() <= 100 &&
-        data.date is string && data.date.size() <= 50 &&
-        data.checkInTime is string && data.checkInTime.size() <= 50 &&
-        (data.get('checkOutTime', '') is string) && (data.get('checkOutTime', '').size() <= 50) &&
-        (data.get('durationMinutes', 0) is number);
-    }
-
-    function isValidMetadata(data) {
-      return (data.get('migrated', false) is bool) &&
-             (data.get('timestamp', '') is string) && (data.get('timestamp', '').size() <= 50) &&
-             (data.get('items', []) is list) && (data.get('items', []).size() <= 1000);
-    }
-
-    function isValidAuditLog(data) {
-      return data.keys().hasAll(['id', 'timestamp', 'eventType', 'userId']) &&
-        data.id is string && data.id.size() <= 128 &&
-        data.timestamp is string && data.timestamp.size() <= 50 &&
-        data.eventType is string && data.eventType.size() > 0 && data.eventType.size() <= 50 &&
-        data.userId is string && data.userId.size() <= 128;
-    }
-
     // ── Collection rules ──
-    //
-    // SECURITY ARCHITECTURE:
-    // All writes are routed through the Express server proxy which:
-    //   1. Verifies Firebase Auth token
-    //   2. Loads employee record and checks permissions
-    //   3. Validates payload schema
-    //   4. Logs audit trail
-    //   5. Writes via Firestore REST API (bypassing rules)
-    //
-    // Client-side Firestore SDK writes are blocked via "allow write: if false".
-    // Client-side Firestore SDK reads are open (no auth required).
-    // Security is enforced server-side: all writes go through the proxy,
-    // and the proxy verifies authentication + employee permissions.
+    // Direct client SDK writes are blocked — all writes are proxied through the Express server.
+    // Direct client reads require authentication to prevent open unauthenticated database dumping.
 
     match /products/{productId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read: if isSignedIn();
+      allow write: if false;
     }
 
     match /sales/{saleId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read: if isSignedIn();
+      allow write: if false;
     }
 
     match /expenses/{expenseId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read: if isSignedIn() && (hasPermission('expenses') || isAdmin());
+      allow write: if false;
     }
 
     match /employees/{employeeId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read: if isSignedIn();
+      allow write: if false;
     }
 
     match /customers/{customerId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read: if isSignedIn();
+      allow write: if false;
     }
 
     match /suppliers/{supplierId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read: if isSignedIn();
+      allow write: if false;
     }
 
     match /attendance/{attendanceId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read: if isSignedIn();
+      allow write: if false;
     }
 
     match /categories/{categoryId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read: if isSignedIn();
+      allow write: if false;
     }
 
     match /seasons/{seasonId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read: if isSignedIn();
+      allow write: if false;
     }
 
     match /metadata/{metadataId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read: if isSignedIn() && isAdmin();
+      allow write: if false;
     }
 
     match /audit_logs/{logId} {
-      allow read: if true;
+      allow read: if isSignedIn() && isAdmin();
       allow write: if false;
     }
   }

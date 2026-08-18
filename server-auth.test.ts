@@ -126,12 +126,14 @@ describe('hasWritePermission', () => {
       expect(hasWritePermission(cashierEmployee, 'attendance')).toBe(true);
     });
 
-    it('allows any authenticated user to write categories', () => {
-      expect(hasWritePermission(cashierEmployee, 'categories')).toBe(true);
+    it('allows settings/admin user to write categories', () => {
+      expect(hasWritePermission(adminEmployee, 'categories')).toBe(true);
+      expect(hasWritePermission(cashierEmployee, 'categories')).toBe(false);
     });
 
-    it('allows any authenticated user to write seasons', () => {
-      expect(hasWritePermission(cashierEmployee, 'seasons')).toBe(true);
+    it('allows settings/admin user to write seasons', () => {
+      expect(hasWritePermission(adminEmployee, 'seasons')).toBe(true);
+      expect(hasWritePermission(cashierEmployee, 'seasons')).toBe(false);
     });
   });
 

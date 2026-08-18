@@ -1,8 +1,7 @@
-
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 import { Employee } from '../../types';
 import { AttendanceService, EmployeeService } from '../../services/employeeService';
-import { setServerSessionToken } from '../../services/base';
+import { logoutSession } from '../../services/base';
 
 const STORAGE_KEY_USER = 'taiba_current_user';
 const STORAGE_KEY_SESSION = 'taiba_current_session';
@@ -161,7 +160,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     localStorage.removeItem(STORAGE_KEY_SESSION);
     localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
     localStorage.removeItem(STORAGE_KEY_USER);
-    setServerSessionToken(null);
+    await logoutSession();
     setCurrentUser(null);
   }, []);
 
