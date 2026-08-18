@@ -1,5 +1,6 @@
 // Server-side authorization and validation functions
 // Extracted for testability and single-responsibility.
+import crypto from 'crypto';
 
 // Allowed collections whitelist - prevents writing to arbitrary collections
 export const ALLOWED_COLLECTIONS = new Set([
@@ -88,6 +89,75 @@ export function normalizeCartStockItems(items: any[]): { items?: NormalizedStock
     result.push({ productId, totalQuantity });
   }
   return { items: result };
+}
+
+// Canonical Request Fingerprinting for Idempotency (AUDIT-014)
+export interface CanonicalCartItem {
+  productId: string;
+  quantity: number;
+}
+
+export interface CanonicalManualItem {
+  name: string;
+  sellingPrice: number;
+  purchasePrice: number;
+  quantity: number;
+}
+
+export function generateSaleRequestFingerprint(sale: any): string {
+  if (!sale || typeof sale !== 'object') return '';
+
+  const customerId = (typeof sale.customerId === 'string') ? sale.customerId.trim() : '';
+  const paymentMethod = (typeof sale.paymentMethod === 'string') ? sale.paymentMethod.trim() : '';
+  const dueDate = (typeof sale.dueDate === 'string') ? sale.dueDate.trim().split('T')[0] : '';
+  const createdBy = (typeof sale.createdBy === 'string') ? sale.createdBy.trim() : '';
+
+  const rawItems = Array.isArray(sale.items) ? sale.items : [];
+
+  // Group and normalize physical inventory products by productId
+  const productMap = new Map<string, number>();
+  const manualItemsList: CanonicalManualItem[] = [];
+
+  for (const item of rawItems) {
+    if (!item || typeof item !== 'object') continue;
+    if (item.isManualItem) {
+      manualItemsList.push({
+        name: (item.name || '').toString().trim().toLowerCase(),
+        sellingPrice: roundMoney(Number(item.sellingPrice) || 0),
+        purchasePrice: roundMoney(Number(item.purchasePrice) || 0),
+        quantity: Math.max(1, Math.floor(Number(item.quantity) || 1)),
+      });
+    } else if (item.id && typeof item.id === 'string') {
+      const pid = item.id.trim();
+      const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
+      productMap.set(pid, (productMap.get(pid) || 0) + qty);
+    }
+  }
+
+  // Sort physical products canonically by productId
+  const sortedPhysicalProducts: CanonicalCartItem[] = Array.from(productMap.entries())
+    .map(([productId, quantity]) => ({ productId, quantity }))
+    .sort((a, b) => a.productId.localeCompare(b.productId));
+
+  // Sort manual items canonically
+  manualItemsList.sort((a, b) => {
+    const nameCmp = a.name.localeCompare(b.name);
+    if (nameCmp !== 0) return nameCmp;
+    if (a.sellingPrice !== b.sellingPrice) return a.sellingPrice - b.sellingPrice;
+    return a.quantity - b.quantity;
+  });
+
+  const canonicalObj = {
+    c: customerId,
+    p: paymentMethod,
+    d: dueDate,
+    u: createdBy,
+    i: sortedPhysicalProducts,
+    m: manualItemsList,
+  };
+
+  const canonicalJson = JSON.stringify(canonicalObj);
+  return crypto.createHash('sha256').update(canonicalJson).digest('hex');
 }
 
 // Comprehensive validation for sales payloads
