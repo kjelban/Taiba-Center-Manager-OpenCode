@@ -549,9 +549,9 @@ describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', 
     });
 
     const saved = db.getDoc('sales', 's-hack-1')?.data;
-    expect(saved.totalAmount).toBe(200);
-    expect(saved.profit).toBe(80);
-    expect(saved.items[0].sellingPrice).toBe(100);
+    expect(saved!.totalAmount).toBe(200);
+    expect(saved!.profit).toBe(80);
+    expect(saved!.items[0].sellingPrice).toBe(100);
   });
 
   it('FIN-013-02: Client manipulated totalAmount is overridden by server calculation', async () => {
@@ -590,8 +590,8 @@ describe('AUDIT-013 (SIMULATION): Financial Calculation Trust & Recalculation', 
     });
 
     const c = db.getDoc('customers', 'c1')?.data;
-    expect(c.totalDebt).toBe(190);
-    expect(c.totalPurchases).toBe(290);
+    expect(c!.totalDebt).toBe(190);
+    expect(c!.totalPurchases).toBe(290);
   });
 
   it('FIN-013-05: Manipulated debt payload cannot alter customer debt balance', () => {

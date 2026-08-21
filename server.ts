@@ -76,7 +76,7 @@ function getServiceAccountCredentials(): { client_email: string; private_key: st
 
 export async function getGoogleAccessToken(): Promise<string> {
   if (process.env.FIRESTORE_EMULATOR_HOST) {
-    return 'emulator-dummy-token';
+    return 'owner';
   }
 
   if (cachedGoogleToken && cachedGoogleToken.expiresAt > Date.now() + 60000) {
@@ -132,14 +132,23 @@ export async function getGoogleAccessToken(): Promise<string> {
 
 // ---- Firestore REST Helpers ----
 
-export const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || 'taiba-center-manager';
-export const FIRESTORE_DB_PATH = `projects/${PROJECT_ID}/databases/(default)`;
+export function getFirestoreProjectId(): string {
+  return process.env.GCLOUD_PROJECT || process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || 'taiba-center-manager';
+}
+
+export function getFirestoreDbPath(): string {
+  return `projects/${getFirestoreProjectId()}/databases/(default)`;
+}
+
+export const PROJECT_ID = getFirestoreProjectId();
+export const FIRESTORE_DB_PATH = getFirestoreDbPath();
 
 export function getFirestoreBaseUrl(): string {
+  const dbPath = getFirestoreDbPath();
   if (process.env.FIRESTORE_EMULATOR_HOST) {
-    return `http://${process.env.FIRESTORE_EMULATOR_HOST}/v1/${FIRESTORE_DB_PATH}`;
+    return `http://${process.env.FIRESTORE_EMULATOR_HOST}/v1/${dbPath}`;
   }
-  return `https://firestore.googleapis.com/v1/${FIRESTORE_DB_PATH}`;
+  return `https://firestore.googleapis.com/v1/${dbPath}`;
 }
 
 export function jsToFirestoreValue(val: any): any {
@@ -250,9 +259,6 @@ export async function runFirestoreTransaction<T>(
     const token = await getGoogleAccessToken();
 
     const beginBody: any = { options: { readWrite: {} } };
-    if (previousTxnId) {
-      beginBody.options.readWrite.retryTransaction = previousTxnId;
-    }
 
     const beginResp = await fetch(
       `${baseUrl}/documents:beginTransaction`,
@@ -272,6 +278,7 @@ export async function runFirestoreTransaction<T>(
     previousTxnId = txnId;
 
     const writes: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[] = [];
+    const readVersions = new Map<string, string>();
     let hasWritten = false;
 
     const txn: FirestoreTransaction = {
@@ -279,8 +286,11 @@ export async function runFirestoreTransaction<T>(
         if (hasWritten) {
           throw new Error("Firestore transactions require all reads to execute before writes.");
         }
+        const url = process.env.FIRESTORE_EMULATOR_HOST
+          ? `${baseUrl}/documents/${collection}/${id}`
+          : `${baseUrl}/documents/${collection}/${id}?transaction=${encodeURIComponent(txnId)}`;
         const resp = await fetch(
-          `${baseUrl}/documents/${collection}/${id}?transaction=${encodeURIComponent(txnId)}`,
+          url,
           {
             headers: { Authorization: `Bearer ${token}` },
           }
@@ -296,6 +306,9 @@ export async function runFirestoreTransaction<T>(
           for (const [k, v] of Object.entries(data.fields)) {
             result[k] = firestoreValueToJs(v as any);
           }
+        }
+        if (data.updateTime) {
+          readVersions.set(`${collection}/${id}`, data.updateTime);
         }
         return { data: result, updateTime: data.updateTime };
       },
@@ -317,17 +330,6 @@ export async function runFirestoreTransaction<T>(
     try {
       result = await operation(txn);
     } catch (userErr: any) {
-      // Explicitly rollback transaction on business logic error or insufficient stock
-      try {
-        await fetch(
-          `${baseUrl}/documents:rollback`,
-          {
-            method: "POST",
-            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ transaction: txnId }),
-          }
-        );
-      } catch {}
       throw userErr;
     }
 
@@ -335,19 +337,25 @@ export async function runFirestoreTransaction<T>(
       return result;
     }
 
+    const dbPath = getFirestoreDbPath();
     const commitBody: any = {
       transaction: txnId,
       writes: writes.map(w => {
         if (w.type === 'delete') {
-          return { delete: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}` };
+          return { delete: `${dbPath}/documents/${w.collection}/${w.id}` };
         }
         const fields = jsToFirestoreValue(w.data || {}).mapValue.fields;
-        return {
+        const writeObj: any = {
           update: {
-            name: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}`,
+            name: `${dbPath}/documents/${w.collection}/${w.id}`,
             fields,
           },
         };
+        const readUpdateTime = readVersions.get(`${w.collection}/${w.id}`);
+        if (readUpdateTime) {
+          writeObj.currentDocument = { updateTime: readUpdateTime };
+        }
+        return writeObj;
       }),
     };
 
@@ -365,7 +373,7 @@ export async function runFirestoreTransaction<T>(
     }
 
     const commitErrText = await commitResp.text();
-    const isContention = commitResp.status === 409 || commitResp.status === 503 || commitErrText.includes("ABORTED") || commitErrText.includes("conflict") || commitErrText.includes("UNAVAILABLE");
+    const isContention = commitResp.status === 409 || commitResp.status === 400 || commitResp.status === 503 || commitErrText.includes("ABORTED") || commitErrText.includes("conflict") || commitErrText.includes("UNAVAILABLE") || commitErrText.includes("FAILED_PRECONDITION");
     if (isContention && attempt < maxRetries) {
       const backoffMs = Math.min(1000, Math.pow(2, attempt) * 40 + Math.floor(Math.random() * 30));
       await new Promise(resolve => setTimeout(resolve, backoffMs));
@@ -411,6 +419,191 @@ export function cleanExpiredSessions() {
   }
 }
 setInterval(cleanExpiredSessions, 10 * 60 * 1000);
+
+// ---- Firestore batch commit helper (for legacy and maintenance operations) ----
+
+export async function firestoreCommit(writes: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[]): Promise<void> {
+  if (writes.length === 0) return;
+  const token = await getGoogleAccessToken();
+  const baseUrl = getFirestoreBaseUrl();
+  const dbPath = getFirestoreDbPath();
+  const batchBody: any = {
+    writes: writes.map(w => {
+      if (w.type === 'delete') {
+        return { delete: `${dbPath}/documents/${w.collection}/${w.id}` };
+      }
+      const fields = jsToFirestoreValue(w.data || {}).mapValue.fields;
+      return { update: { name: `${dbPath}/documents/${w.collection}/${w.id}`, fields } };
+    }),
+  };
+  const resp = await fetch(`${baseUrl}/documents:commit`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(batchBody),
+  });
+  if (!resp.ok) throw new Error(`Firestore commit failed: ${resp.status} ${await resp.text()}`);
+}
+
+// ---- Sales transactional business function (Shared Production Logic) ----
+
+export interface SaleTransactionResult {
+  ok: boolean;
+  duplicate: boolean;
+  saleId: string;
+  totalAmount: number;
+  profit: number;
+  message?: string;
+}
+
+export async function executeSaleTransaction(salePayload: any): Promise<SaleTransactionResult> {
+  const norm = normalizeCartStockItems(salePayload.items);
+  if (norm.error) {
+    const err: any = new Error(norm.error);
+    err.status = 400;
+    err.code = 'INVALID_CART_ITEMS';
+    throw err;
+  }
+  const stockItems = norm.items || [];
+
+  // Calculate Canonical Intent Fingerprint for Idempotency (AUDIT-014)
+  const incomingFingerprint = generateSaleRequestFingerprint(salePayload);
+
+  return runFirestoreTransaction(async (txn) => {
+    // --- 1. IDEMPOTENCY CHECK (AUDIT-014: Canonical Payload Equivalence) ---
+    const existingSaleDoc = await txn.get('sales', salePayload.id);
+    if (existingSaleDoc && existingSaleDoc.data) {
+      const existing = existingSaleDoc.data;
+      // Determine existing fingerprint (support backward compatibility for historical records)
+      const existingFingerprint = existing.requestFingerprint || generateSaleRequestFingerprint(existing);
+
+      if (existingFingerprint === incomingFingerprint) {
+        return {
+          ok: true,
+          duplicate: true,
+          saleId: salePayload.id,
+          totalAmount: existing.totalAmount,
+          profit: existing.profit,
+          message: 'Sale already processed',
+        };
+      }
+
+      const err: any = new Error("Idempotency key reused with different sale payload");
+      err.code = "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD";
+      err.status = 409;
+      throw err;
+    }
+
+    // --- 2. READ PHASE (all reads strictly before writes) ---
+    const productsMap = new Map<string, any>();
+    for (const item of stockItems) {
+      const prodDoc = await txn.get('products', item.productId);
+      if (!prodDoc || !prodDoc.data) {
+        const err: any = new Error(`Product not found: ${item.productId}`);
+        err.code = 'PRODUCT_NOT_FOUND';
+        err.status = 404;
+        throw err;
+      }
+      const currentStock = prodDoc.data.stock;
+      if (typeof currentStock !== 'number' || currentStock < item.totalQuantity) {
+        const err: any = new Error(`الرصيد غير كافٍ للمنتج "${prodDoc.data.name || item.productId}": المتوفر ${currentStock ?? 0}، المطلوب ${item.totalQuantity}`);
+        err.code = 'INSUFFICIENT_STOCK';
+        err.status = 400;
+        err.available = currentStock;
+        err.requested = item.totalQuantity;
+        err.productId = item.productId;
+        throw err;
+      }
+      productsMap.set(item.productId, prodDoc.data);
+    }
+
+    // Security check for manual items: ensure manual item ID is not masquerading as a catalog product (AUDIT-013)
+    for (const item of (salePayload.items as any[])) {
+      if (item?.isManualItem && item.id) {
+        const collisionDoc = await txn.get('products', item.id);
+        if (collisionDoc && collisionDoc.data) {
+          const err: any = new Error(`Cannot treat existing catalog product "${collisionDoc.data.name}" as manual item.`);
+          err.code = 'MANUAL_ITEM_CATALOG_COLLISION';
+          err.status = 400;
+          throw err;
+        }
+      }
+    }
+
+    let customerDoc: any = null;
+    if (salePayload.customerId) {
+      const cust = await txn.get('customers', salePayload.customerId);
+      if (cust && cust.data) {
+        customerDoc = cust.data;
+      }
+    }
+
+    // --- 3. SERVER-SIDE FINANCIAL RECALCULATION (AUDIT-013) ---
+    let serverTotalAmount = 0;
+    let serverTotalCost = 0;
+    const verifiedItems = (salePayload.items as any[]).map((rawItem: any) => {
+      if (rawItem.isManualItem) {
+        const buyPrice = typeof rawItem.purchasePrice === 'number' && Number.isFinite(rawItem.purchasePrice) && rawItem.purchasePrice >= 0 ? roundMoney(rawItem.purchasePrice) : 0;
+        const sellPrice = typeof rawItem.sellingPrice === 'number' && Number.isFinite(rawItem.sellingPrice) && rawItem.sellingPrice > 0 ? roundMoney(rawItem.sellingPrice) : 0;
+        const qty = rawItem.quantity || 1;
+        serverTotalAmount += sellPrice * qty;
+        serverTotalCost += buyPrice * qty;
+        return {
+          ...rawItem,
+          sellingPrice: sellPrice,
+          purchasePrice: buyPrice,
+        };
+      }
+
+      const trustedProduct = productsMap.get(rawItem.id);
+      const trustedSellPrice = typeof trustedProduct?.sellingPrice === 'number' ? roundMoney(trustedProduct.sellingPrice) : (rawItem.sellingPrice || 0);
+      const trustedBuyPrice = typeof trustedProduct?.purchasePrice === 'number' ? roundMoney(trustedProduct.purchasePrice) : (rawItem.purchasePrice || 0);
+      const qty = rawItem.quantity;
+
+      serverTotalAmount += trustedSellPrice * qty;
+      serverTotalCost += trustedBuyPrice * qty;
+
+      return {
+        ...rawItem,
+        name: trustedProduct?.name || rawItem.name,
+        category: trustedProduct?.category || rawItem.category,
+        size: trustedProduct?.size || rawItem.size,
+        color: trustedProduct?.color || rawItem.color,
+        sellingPrice: trustedSellPrice,
+        purchasePrice: trustedBuyPrice,
+      };
+    });
+
+    serverTotalAmount = roundMoney(serverTotalAmount);
+    const serverProfit = roundMoney(serverTotalAmount - serverTotalCost);
+
+    const authoritativeSale = {
+      ...salePayload,
+      items: verifiedItems,
+      totalAmount: serverTotalAmount,
+      profit: serverProfit,
+      requestFingerprint: incomingFingerprint,
+    };
+
+    // --- 4. WRITE PHASE (atomic commit) ---
+    txn.set('sales', salePayload.id, authoritativeSale);
+
+    for (const item of stockItems) {
+      const product = productsMap.get(item.productId);
+      const newStock = (product.stock || 0) - item.totalQuantity;
+      txn.update('products', item.productId, { ...product, stock: newStock });
+    }
+
+    if (salePayload.customerId && customerDoc) {
+      const isDebt = salePayload.paymentMethod === 'آجل (دين)';
+      const totalPurchases = roundMoney((customerDoc.totalPurchases || 0) + serverTotalAmount);
+      const totalDebt = isDebt ? roundMoney((customerDoc.totalDebt || 0) + serverTotalAmount) : (customerDoc.totalDebt || 0);
+      const updatedCustomer = { ...customerDoc, totalPurchases, totalDebt, lastPurchaseDate: new Date().toISOString() };
+      txn.update('customers', salePayload.customerId, updatedCustomer);
+    }
+
+    return { ok: true, duplicate: false, saleId: salePayload.id, totalAmount: serverTotalAmount, profit: serverProfit };
+  });
+}
 
 async function startServer() {
   const app = express();
@@ -1068,29 +1261,6 @@ ${JSON.stringify(summary, null, 2)}
     }
   });
 
-  // ---- Firestore batch commit helper (for legacy and maintenance operations) ----
-
-  export async function firestoreCommit(writes: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[]): Promise<void> {
-    if (writes.length === 0) return;
-    const token = await getGoogleAccessToken();
-    const baseUrl = getFirestoreBaseUrl();
-    const batchBody: any = {
-      writes: writes.map(w => {
-        if (w.type === 'delete') {
-          return { delete: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}` };
-        }
-        const fields = jsToFirestoreValue(w.data || {}).mapValue.fields;
-        return { update: { name: `${FIRESTORE_DB_PATH}/documents/${w.collection}/${w.id}`, fields } };
-      }),
-    };
-    const resp = await fetch(`${baseUrl}/documents:commit`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(batchBody),
-    });
-    if (!resp.ok) throw new Error(`Firestore commit failed: ${resp.status} ${await resp.text()}`);
-  }
-
   // ---- Sales transactional endpoints (AUDIT-005, AUDIT-013, AUDIT-014 Enforced) ----
 
   app.post("/api/sales/create", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
@@ -1099,148 +1269,7 @@ ${JSON.stringify(summary, null, 2)}
       const valError = validateSalePayload(sale);
       if (valError) return res.status(400).json({ error: valError });
 
-      const norm = normalizeCartStockItems(sale.items);
-      if (norm.error) return res.status(400).json({ error: norm.error });
-      const stockItems = norm.items || [];
-
-      // Calculate Canonical Intent Fingerprint for Idempotency (AUDIT-014)
-      const incomingFingerprint = generateSaleRequestFingerprint(sale);
-
-      const result = await runFirestoreTransaction(async (txn) => {
-        // --- 1. IDEMPOTENCY CHECK (AUDIT-014: Canonical Payload Equivalence) ---
-        const existingSaleDoc = await txn.get('sales', sale.id);
-        if (existingSaleDoc && existingSaleDoc.data) {
-          const existing = existingSaleDoc.data;
-          // Determine existing fingerprint (support backward compatibility for historical records)
-          const existingFingerprint = existing.requestFingerprint || generateSaleRequestFingerprint(existing);
-
-          if (existingFingerprint === incomingFingerprint) {
-            return {
-              ok: true,
-              duplicate: true,
-              saleId: sale.id,
-              totalAmount: existing.totalAmount,
-              profit: existing.profit,
-              message: 'Sale already processed',
-            };
-          }
-
-          const err: any = new Error("Idempotency key reused with different sale payload");
-          err.code = "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD";
-          err.status = 409;
-          throw err;
-        }
-
-        // --- 2. READ PHASE (all reads strictly before writes) ---
-        const productsMap = new Map<string, any>();
-        for (const item of stockItems) {
-          const prodDoc = await txn.get('products', item.productId);
-          if (!prodDoc || !prodDoc.data) {
-            const err: any = new Error(`Product not found: ${item.productId}`);
-            err.code = 'PRODUCT_NOT_FOUND';
-            err.status = 404;
-            throw err;
-          }
-          const currentStock = prodDoc.data.stock;
-          if (typeof currentStock !== 'number' || currentStock < item.totalQuantity) {
-            const err: any = new Error(`الرصيد غير كافٍ للمنتج "${prodDoc.data.name || item.productId}": المتوفر ${currentStock ?? 0}، المطلوب ${item.totalQuantity}`);
-            err.code = 'INSUFFICIENT_STOCK';
-            err.status = 400;
-            err.available = currentStock;
-            err.requested = item.totalQuantity;
-            err.productId = item.productId;
-            throw err;
-          }
-          productsMap.set(item.productId, prodDoc.data);
-        }
-
-        // Security check for manual items: ensure manual item ID is not masquerading as a catalog product (AUDIT-013)
-        for (const item of (sale.items as any[])) {
-          if (item?.isManualItem && item.id) {
-            const collisionDoc = await txn.get('products', item.id);
-            if (collisionDoc && collisionDoc.data) {
-              const err: any = new Error(`Cannot treat existing catalog product "${collisionDoc.data.name}" as manual item.`);
-              err.code = 'MANUAL_ITEM_CATALOG_COLLISION';
-              err.status = 400;
-              throw err;
-            }
-          }
-        }
-
-        let customerDoc: any = null;
-        if (sale.customerId) {
-          const cust = await txn.get('customers', sale.customerId);
-          if (cust && cust.data) {
-            customerDoc = cust.data;
-          }
-        }
-
-        // --- 3. SERVER-SIDE FINANCIAL RECALCULATION (AUDIT-013) ---
-        let serverTotalAmount = 0;
-        let serverTotalCost = 0;
-        const verifiedItems = (sale.items as any[]).map((rawItem: any) => {
-          if (rawItem.isManualItem) {
-            const buyPrice = typeof rawItem.purchasePrice === 'number' && Number.isFinite(rawItem.purchasePrice) && rawItem.purchasePrice >= 0 ? roundMoney(rawItem.purchasePrice) : 0;
-            const sellPrice = typeof rawItem.sellingPrice === 'number' && Number.isFinite(rawItem.sellingPrice) && rawItem.sellingPrice > 0 ? roundMoney(rawItem.sellingPrice) : 0;
-            const qty = rawItem.quantity || 1;
-            serverTotalAmount += sellPrice * qty;
-            serverTotalCost += buyPrice * qty;
-            return {
-              ...rawItem,
-              sellingPrice: sellPrice,
-              purchasePrice: buyPrice,
-            };
-          }
-
-          const trustedProduct = productsMap.get(rawItem.id);
-          const trustedSellPrice = typeof trustedProduct?.sellingPrice === 'number' ? roundMoney(trustedProduct.sellingPrice) : (rawItem.sellingPrice || 0);
-          const trustedBuyPrice = typeof trustedProduct?.purchasePrice === 'number' ? roundMoney(trustedProduct.purchasePrice) : (rawItem.purchasePrice || 0);
-          const qty = rawItem.quantity;
-
-          serverTotalAmount += trustedSellPrice * qty;
-          serverTotalCost += trustedBuyPrice * qty;
-
-          return {
-            ...rawItem,
-            name: trustedProduct?.name || rawItem.name,
-            category: trustedProduct?.category || rawItem.category,
-            size: trustedProduct?.size || rawItem.size,
-            color: trustedProduct?.color || rawItem.color,
-            sellingPrice: trustedSellPrice,
-            purchasePrice: trustedBuyPrice,
-          };
-        });
-
-        serverTotalAmount = roundMoney(serverTotalAmount);
-        const serverProfit = roundMoney(serverTotalAmount - serverTotalCost);
-
-        const authoritativeSale = {
-          ...sale,
-          items: verifiedItems,
-          totalAmount: serverTotalAmount,
-          profit: serverProfit,
-          requestFingerprint: incomingFingerprint,
-        };
-
-        // --- 4. WRITE PHASE (atomic commit) ---
-        txn.set('sales', sale.id, authoritativeSale);
-
-        for (const item of stockItems) {
-          const product = productsMap.get(item.productId);
-          const newStock = (product.stock || 0) - item.totalQuantity;
-          txn.update('products', item.productId, { ...product, stock: newStock });
-        }
-
-        if (sale.customerId && customerDoc) {
-          const isDebt = sale.paymentMethod === 'آجل (دين)';
-          const totalPurchases = roundMoney((customerDoc.totalPurchases || 0) + serverTotalAmount);
-          const totalDebt = isDebt ? roundMoney((customerDoc.totalDebt || 0) + serverTotalAmount) : (customerDoc.totalDebt || 0);
-          const updatedCustomer = { ...customerDoc, totalPurchases, totalDebt, lastPurchaseDate: new Date().toISOString() };
-          txn.update('customers', sale.customerId, updatedCustomer);
-        }
-
-        return { ok: true, saleId: sale.id, totalAmount: serverTotalAmount, profit: serverProfit };
-      });
+      const result = await executeSaleTransaction(sale);
 
       // Audit log strictly after successful transaction commit
       if (!result.duplicate) {

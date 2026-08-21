@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import crypto from 'crypto';
 import {
+  executeSaleTransaction,
   runFirestoreTransaction,
   firestoreGetDocument,
   firestoreSetDocument,
@@ -16,126 +17,33 @@ import {
  * ════════════════════════════════════════════════════════════════════════════════
  * FIRESTORE EMULATOR INTEGRATION TEST SUITE (AUDIT-005, AUDIT-013, AUDIT-014)
  * ════════════════════════════════════════════════════════════════════════════════
- * Classification: SHARED PRODUCTION FUNCTION TEST (Direct Execution of runFirestoreTransaction against Firestore Emulator)
+ * Classification: DATABASE INTEGRATION — SHARED PRODUCTION BUSINESS FUNCTION
+ * (Direct Execution of shared executeSaleTransaction against Firestore Emulator)
  *
  * Safety Guard:
  * These tests require the Firebase Firestore Emulator:
- *   firebase emulators:start --only firestore
+ *   firebase emulators:exec --only firestore "npm test"
  *
  * Execution environment flag: FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
  * If FIRESTORE_EMULATOR_HOST is missing, tests are safely skipped to protect Production.
+ * If tests somehow execute without FIRESTORE_EMULATOR_HOST, beforeAll will fail-closed.
  */
 
 const EMULATOR_HOST = process.env.FIRESTORE_EMULATOR_HOST;
 const isEmulatorActive = Boolean(EMULATOR_HOST);
 
-// Helper function to execute production sales logic using authoritative server functions
-async function executeProductionSale(salePayload: any) {
-  const norm = normalizeCartStockItems(salePayload.items);
-  if (norm.error) throw new Error(norm.error);
-  const stockItems = norm.items || [];
-
-  const incomingFingerprint = generateSaleRequestFingerprint(salePayload);
-
-  return runFirestoreTransaction(async (txn) => {
-    // 1. Idempotency check
-    const existingDoc = await txn.get('sales', salePayload.id);
-    if (existingDoc && existingDoc.data) {
-      const existing = existingDoc.data;
-      const existingFingerprint = existing.requestFingerprint || generateSaleRequestFingerprint(existing);
-
-      if (existingFingerprint === incomingFingerprint) {
-        return {
-          ok: true,
-          duplicate: true,
-          saleId: salePayload.id,
-          totalAmount: existing.totalAmount,
-          profit: existing.profit,
-        };
-      }
-
-      const err: any = new Error("Idempotency key reused with different sale payload");
-      err.code = "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD";
-      err.status = 409;
-      throw err;
-    }
-
-    // 2. Read products
-    const productsMap = new Map<string, any>();
-    for (const item of stockItems) {
-      const prodDoc = await txn.get('products', item.productId);
-      if (!prodDoc || !prodDoc.data) {
-        const err: any = new Error(`Product not found: ${item.productId}`);
-        err.code = 'PRODUCT_NOT_FOUND';
-        throw err;
-      }
-      const currentStock = prodDoc.data.stock;
-      if (typeof currentStock !== 'number' || currentStock < item.totalQuantity) {
-        const err: any = new Error(`INSUFFICIENT_STOCK`);
-        err.code = 'INSUFFICIENT_STOCK';
-        throw err;
-      }
-      productsMap.set(item.productId, prodDoc.data);
-    }
-
-    let customerDoc: any = null;
-    if (salePayload.customerId) {
-      const cust = await txn.get('customers', salePayload.customerId);
-      if (cust && cust.data) customerDoc = cust.data;
-    }
-
-    // 3. Server-side financial recalculation
-    let serverTotal = 0;
-    let serverCost = 0;
-    const verifiedItems = (salePayload.items as any[]).map((rawItem: any) => {
-      if (rawItem.isManualItem) {
-        const buyPrice = roundMoney(Number(rawItem.purchasePrice) || 0);
-        const sellPrice = roundMoney(Number(rawItem.sellingPrice) || 0);
-        const qty = rawItem.quantity || 1;
-        serverTotal += sellPrice * qty;
-        serverCost += buyPrice * qty;
-        return { ...rawItem, sellingPrice: sellPrice, purchasePrice: buyPrice };
-      }
-      const prod = productsMap.get(rawItem.id);
-      const sellPrice = roundMoney(prod.sellingPrice);
-      const buyPrice = roundMoney(prod.purchasePrice);
-      const qty = rawItem.quantity;
-      serverTotal += sellPrice * qty;
-      serverCost += buyPrice * qty;
-      return { ...rawItem, sellingPrice: sellPrice, purchasePrice: buyPrice };
-    });
-
-    serverTotal = roundMoney(serverTotal);
-    const serverProfit = roundMoney(serverTotal - serverCost);
-
-    const authoritativeSale = {
-      ...salePayload,
-      items: verifiedItems,
-      totalAmount: serverTotal,
-      profit: serverProfit,
-      requestFingerprint: incomingFingerprint,
-    };
-
-    // 4. Writes
-    txn.set('sales', salePayload.id, authoritativeSale);
-
-    for (const item of stockItems) {
-      const prod = productsMap.get(item.productId);
-      txn.update('products', item.productId, { ...prod, stock: prod.stock - item.totalQuantity });
-    }
-
-    if (salePayload.customerId && customerDoc) {
-      const isDebt = salePayload.paymentMethod === 'آجل (دين)';
-      const totalPurchases = roundMoney((customerDoc.totalPurchases || 0) + serverTotal);
-      const totalDebt = isDebt ? roundMoney((customerDoc.totalDebt || 0) + serverTotal) : (customerDoc.totalDebt || 0);
-      txn.update('customers', salePayload.customerId, { ...customerDoc, totalPurchases, totalDebt });
-    }
-
-    return { ok: true, duplicate: false, saleId: salePayload.id, totalAmount: serverTotal, profit: serverProfit };
-  });
-}
+// Use the exact shared production function (No duplicate logic)
+const executeProductionSale = executeSaleTransaction;
 
 describe.skipIf(!isEmulatorActive)('Firestore Emulator Integration Tests (Real Concurrency & ACID Guarantees)', () => {
+  beforeAll(() => {
+    if (!process.env.FIRESTORE_EMULATOR_HOST) {
+      throw new Error(
+        "FAIL-CLOSED SAFETY GUARD: FIRESTORE_EMULATOR_HOST is not set. Execution aborted before database access to protect Production."
+      );
+    }
+  });
+
   it('INT-005-01: Normal sale success against real Firestore document store', async () => {
     const testProdId = `prod-${crypto.randomUUID()}`;
     const testCustId = `cust-${crypto.randomUUID()}`;
@@ -472,5 +380,181 @@ describe.skipIf(!isEmulatorActive)('Firestore Emulator Integration Tests (Real C
     await firestoreDeleteDocument('products', testProd1);
     await firestoreDeleteDocument('products', testProd2);
     await firestoreDeleteDocument('sales', sharedSaleId);
+  });
+
+  // ── AUDIT-013 Real Firestore Integration Tests (Server-Authoritative Pricing) ──
+
+  it('INT-013-01: Server ignores client manipulated price and recalculates from Firestore database price', async () => {
+    const testProdId = `prod-fin-1-${crypto.randomUUID()}`;
+    const testSaleId = `sale-fin-1-${crypto.randomUUID()}`;
+
+    // Database price is 500 selling / 300 cost
+    await firestoreSetDocument('products', testProdId, {
+      id: testProdId,
+      name: 'معطف شتوي فاخر',
+      stock: 5,
+      sellingPrice: 500,
+      purchasePrice: 300,
+    });
+
+    // Client attempts to pay only 1 Dinar per item
+    const manipulatedSale = {
+      id: testSaleId,
+      type: 'بيع',
+      date: new Date().toISOString(),
+      items: [{ id: testProdId, quantity: 2, sellingPrice: 1, purchasePrice: 0.5 }],
+      totalAmount: 2,
+      profit: 1,
+      paymentMethod: 'نقدي',
+      createdBy: 'كاشير',
+      customerId: '',
+      isPaid: true,
+    };
+
+    const res = await executeProductionSale(manipulatedSale);
+    expect(res.ok).toBe(true);
+
+    const savedSale = await firestoreGetDocument(`sales/${testSaleId}`);
+    expect(savedSale.totalAmount).toBe(1000); // 500 * 2 = 1000 (not 2!)
+    expect(savedSale.profit).toBe(400); // 1000 - 600 = 400 (not 1!)
+    expect(savedSale.items[0].sellingPrice).toBe(500);
+    expect(savedSale.items[0].purchasePrice).toBe(300);
+
+    await firestoreDeleteDocument('products', testProdId);
+    await firestoreDeleteDocument('sales', testSaleId);
+  });
+
+  it('INT-013-02: Client manipulated totalAmount and profit are overridden by Firestore product snapshot calculation', async () => {
+    const testProdId = `prod-fin-2-${crypto.randomUUID()}`;
+    const testSaleId = `sale-fin-2-${crypto.randomUUID()}`;
+
+    await firestoreSetDocument('products', testProdId, {
+      id: testProdId,
+      name: 'حذاء أطفال',
+      stock: 10,
+      sellingPrice: 75.5,
+      purchasePrice: 45.25,
+    });
+
+    const manipulatedSale = {
+      id: testSaleId,
+      type: 'بيع',
+      date: new Date().toISOString(),
+      items: [{ id: testProdId, quantity: 3, sellingPrice: 75.5, purchasePrice: 45.25 }],
+      totalAmount: 10, // Manipulated
+      profit: 0,       // Manipulated
+      paymentMethod: 'نقدي',
+      createdBy: 'كاشير',
+      customerId: '',
+      isPaid: true,
+    };
+
+    await executeProductionSale(manipulatedSale);
+
+    const savedSale = await firestoreGetDocument(`sales/${testSaleId}`);
+    const expectedTotal = roundMoney(75.5 * 3); // 226.5
+    const expectedCost = roundMoney(45.25 * 3); // 135.75
+    const expectedProfit = roundMoney(expectedTotal - expectedCost); // 90.75
+
+    expect(savedSale.totalAmount).toBe(expectedTotal);
+    expect(savedSale.profit).toBe(expectedProfit);
+
+    await firestoreDeleteDocument('products', testProdId);
+    await firestoreDeleteDocument('sales', testSaleId);
+  });
+
+  it('INT-013-03: Debt sale increases customer debt strictly by authoritative server-calculated total', async () => {
+    const testProdId = `prod-fin-3-${crypto.randomUUID()}`;
+    const testCustId = `cust-fin-3-${crypto.randomUUID()}`;
+    const testSaleId = `sale-fin-3-${crypto.randomUUID()}`;
+
+    await firestoreSetDocument('products', testProdId, {
+      id: testProdId,
+      name: 'طقم بناتي',
+      stock: 10,
+      sellingPrice: 120,
+      purchasePrice: 70,
+    });
+
+    await firestoreSetDocument('customers', testCustId, {
+      id: testCustId,
+      name: 'سالم المريمي',
+      totalPurchases: 500,
+      totalDebt: 150,
+    });
+
+    const debtSale = {
+      id: testSaleId,
+      type: 'بيع',
+      date: new Date().toISOString(),
+      items: [{ id: testProdId, quantity: 2, sellingPrice: 120, purchasePrice: 70 }],
+      totalAmount: 10, // Client tried to register total as 10 to reduce debt
+      profit: 5,
+      paymentMethod: 'آجل (دين)',
+      createdBy: 'كاشير',
+      customerId: testCustId,
+      isPaid: false,
+    };
+
+    await executeProductionSale(debtSale);
+
+    const updatedCustomer = await firestoreGetDocument(`customers/${testCustId}`);
+    // Authoritative total = 120 * 2 = 240
+    expect(updatedCustomer.totalPurchases).toBe(740); // 500 + 240
+    expect(updatedCustomer.totalDebt).toBe(390);      // 150 + 240
+
+    await firestoreDeleteDocument('products', testProdId);
+    await firestoreDeleteDocument('customers', testCustId);
+    await firestoreDeleteDocument('sales', testSaleId);
+  });
+
+  it('INT-013-04: Existing real catalog product ID masquerading with isManualItem=true is rejected', async () => {
+    const realProdId = `prod-real-cat-${crypto.randomUUID()}`;
+    const fakeSaleId = `sale-fake-man-${crypto.randomUUID()}`;
+
+    await firestoreSetDocument('products', realProdId, {
+      id: realProdId,
+      name: 'فستان تركي أصلي',
+      stock: 5,
+      sellingPrice: 250,
+      purchasePrice: 150,
+    });
+
+    const maliciousManualItemSale = {
+      id: fakeSaleId,
+      type: 'بيع',
+      date: new Date().toISOString(),
+      items: [
+        {
+          id: realProdId, // Real product ID from database
+          name: 'فستان تركي أصلي',
+          isManualItem: true, // Attempt to bypass catalog pricing
+          sellingPrice: 20,
+          purchasePrice: 10,
+          quantity: 1,
+        },
+      ],
+      totalAmount: 20,
+      profit: 10,
+      paymentMethod: 'نقدي',
+      createdBy: 'كاشير',
+      customerId: '',
+      isPaid: true,
+    };
+
+    let caughtError: any = null;
+    try {
+      await executeProductionSale(maliciousManualItemSale);
+    } catch (e: any) {
+      caughtError = e;
+    }
+
+    expect(caughtError?.code).toBe('MANUAL_ITEM_CATALOG_COLLISION');
+
+    // Verify stock remains untouched in Firestore
+    const prodDoc = await firestoreGetDocument(`products/${realProdId}`);
+    expect(prodDoc.stock).toBe(5);
+
+    await firestoreDeleteDocument('products', realProdId);
   });
 });
