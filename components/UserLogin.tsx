@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { Employee } from '../types';
-import { setServerSessionToken } from '../services/base';
 import { Baby, LogIn, Lock, User } from 'lucide-react';
 
 interface UserLoginProps {
@@ -81,7 +80,6 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
           return;
         }
 
-        setServerSessionToken(loginData.token || loginData.sessionToken || null);
         onLogin(loginData.employee);
         return;
       }
@@ -110,7 +108,6 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
         return;
       }
 
-      setServerSessionToken(loginData.token || loginData.sessionToken || null);
       onLogin(loginData.employee);
     } catch (err: any) {
       console.error('Login error:', err);

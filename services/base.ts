@@ -1,45 +1,33 @@
 import { db } from './firebase';
 import { collection, getDocs, onSnapshot } from 'firebase/firestore';
 
-// Server session token (in-memory only; Web UI authenticates authoritatively via HttpOnly cookies)
-let serverSessionToken: string | null = null;
-
-export function setServerSessionToken(token: string | null) {
-  serverSessionToken = token;
-  if (typeof localStorage !== 'undefined') {
-    // Proactively remove legacy key if previously present
+// Proactive legacy localStorage cleanup on initialization
+if (typeof localStorage !== 'undefined') {
+  try {
     localStorage.removeItem('taiba_auth_token');
-  }
-}
-
-export function getServerSessionToken(): string | null {
-  return serverSessionToken;
+  } catch {}
 }
 
 export async function logoutSession(): Promise<void> {
   try {
-    const token = serverSessionToken;
-    const headers: Record<string, string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
     await fetch('/api/auth/logout', {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
     });
   } catch {}
-  setServerSessionToken(null);
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem('taiba_auth_token');
+    } catch {}
+  }
 }
 
 async function doFetch(url: string, body: any): Promise<boolean> {
   try {
-    const token = getServerSessionToken();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
     const res = await fetch(url, {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify(body),
     });
@@ -62,12 +50,9 @@ async function proxyDelete(collectionName: string, id: string): Promise<boolean>
 }
 export async function proxyGet<T>(path: string): Promise<T | null> {
   try {
-    const token = getServerSessionToken();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
     const res = await fetch('/api/proxy/get', {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify({ path }),
     });

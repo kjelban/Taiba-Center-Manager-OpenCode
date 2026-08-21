@@ -1,5 +1,5 @@
 import { Employee, Attendance } from '../types';
-import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection, getServerSessionToken } from './base';
+import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection } from './base';
 import { db } from './firebase';
 import { doc, getDoc } from 'firebase/firestore';
 
@@ -13,17 +13,20 @@ export const EmployeeService = {
   },
 
   saveEmployee: async (employee: Employee): Promise<void> => {
-    await setData(COLLECTIONS.EMPLOYEES, employee.id, employee);
+    return await setData(COLLECTIONS.EMPLOYEES, employee.id, employee);
   },
 
   deleteEmployee: async (id: string): Promise<void> => {
-    await deleteData(COLLECTIONS.EMPLOYEES, id);
+    return await deleteData(COLLECTIONS.EMPLOYEES, id);
   },
 
   getEmployee: async (id: string): Promise<Employee | null> => {
     try {
-      const snap = await getDoc(doc(db, COLLECTIONS.EMPLOYEES, id));
-      if (snap.exists()) return snap.data() as Employee;
+      const docRef = doc(db, COLLECTIONS.EMPLOYEES, id);
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        return docSnap.data() as Employee;
+      }
       return null;
     } catch {
       return null;
@@ -41,13 +44,10 @@ export const AttendanceService = {
   },
 
   getActiveSession: async (employeeId?: string): Promise<Attendance | null> => {
-    const token = getServerSessionToken();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
     try {
       const resp = await fetch('/api/attendance/active', {
         method: 'POST',
-        headers,
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
         body: JSON.stringify({ employeeId }),
       });
@@ -60,12 +60,9 @@ export const AttendanceService = {
   },
 
   clockIn: async (employee: Employee): Promise<Attendance> => {
-    const token = getServerSessionToken();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
     const resp = await fetch('/api/clockin', {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify({ employeeId: employee.id, employeeName: employee.name }),
     });
@@ -78,12 +75,9 @@ export const AttendanceService = {
   },
 
   clockOut: async (recordId: string): Promise<void> => {
-    const token = getServerSessionToken();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
     const resp = await fetch('/api/clockout', {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify({ attendanceId: recordId, id: recordId }),
     });

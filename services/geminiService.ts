@@ -1,19 +1,15 @@
 import { Product, Sale } from "../types";
-import { getServerSessionToken } from "./base";
 
 export const GeminiService = {
   // Suggest a selling price based on cost and market trends via backend server
   suggestPrice: async (productName: string, costPrice: number, season: string): Promise<string> => {
     try {
-      const token = getServerSessionToken();
-      if (!token) return "عذراً، يجب تسجيل الدخول لاستخدام هذه الميزة.";;
-
       const response = await fetch("/api/gemini/suggest-price", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
         },
+        credentials: "same-origin",
         body: JSON.stringify({ productName, costPrice, season }),
       });
 
@@ -33,15 +29,12 @@ export const GeminiService = {
   // Analyze Sales Data via backend server
   analyzeBusiness: async (sales: Sale[], products: Product[]): Promise<string> => {
     try {
-      const token = getServerSessionToken();
-      if (!token) return "عذراً، يجب تسجيل الدخول لاستخدام هذه الميزة.";
-
       const response = await fetch("/api/gemini/analyze-business", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
         },
+        credentials: "same-origin",
         body: JSON.stringify({ sales, products }),
       });
 

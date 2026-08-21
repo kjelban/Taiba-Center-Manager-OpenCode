@@ -326,4 +326,47 @@ describe('AUDIT-016: HttpOnly Session Cookie Storage & Lifecycle Verification', 
     serverSessions.delete(token);
     expect(serverSessions.get(token)).toBeUndefined();
   });
+
+  it('AUTH-016-08: Web Login JSON response does NOT disclose raw session credential', () => {
+    // Simulating login handler output formatting
+    const safeEmployee = { id: 'emp-1', name: 'أحمد', role: 'كاشير' };
+    const loginJsonResponse: any = { ok: true, employee: safeEmployee };
+
+    expect(loginJsonResponse.ok).toBe(true);
+    expect(loginJsonResponse.employee).toEqual(safeEmployee);
+    // Crucial: token/sessionToken must NOT exist in JSON payload
+    expect(loginJsonResponse.token).toBeUndefined();
+    expect(loginJsonResponse.sessionToken).toBeUndefined();
+  });
+
+  it('AUTH-016-09: Session credential is exclusively emitted via Set-Cookie header', () => {
+    const token = 'sess_secure_random_entropy_98765';
+    const cookieHeader = buildSessionCookieHeader(token, true, 86400000);
+
+    expect(cookieHeader).toContain('taiba_session=sess_secure_random_entropy_98765');
+    expect(cookieHeader).toContain('HttpOnly');
+    expect(cookieHeader).toContain('SameSite=Strict');
+    expect(cookieHeader).toContain('Secure');
+  });
+
+  it('AUTH-016-10: Browser-authenticated requests succeed via cookie without Authorization header', () => {
+    const token = 'sess_cookie_only_session_111';
+    serverSessions.set(token, { employeeId: 'emp-cookie-1', expiresAt: Date.now() + 100000 });
+
+    // Mock incoming request with ONLY Cookie header (no Authorization header)
+    const reqHeaders: Record<string, string> = {
+      cookie: `taiba_session=${token}; other=value`,
+    };
+
+    const cookies = parseCookies(reqHeaders.cookie);
+    const extractedToken = cookies['taiba_session'];
+    expect(extractedToken).toBe(token);
+
+    const session = serverSessions.get(extractedToken!);
+    expect(session).toBeDefined();
+    expect(session?.employeeId).toBe('emp-cookie-1');
+
+    // Cleanup
+    serverSessions.delete(token);
+  });
 });

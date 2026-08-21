@@ -1,17 +1,11 @@
 import { Sale } from '../types';
-import { COLLECTIONS, getAll, subscribeToCollection, handleFirestoreError, OperationType, getServerSessionToken } from './base';
-
-async function getIdToken(): Promise<string> {
-  const token = getServerSessionToken();
-  if (!token) throw new Error('Not authenticated');
-  return token;
-}
+import { COLLECTIONS, getAll, subscribeToCollection, handleFirestoreError, OperationType } from './base';
 
 async function post(endpoint: string, body: any): Promise<any> {
-  const token = await getIdToken();
   const res = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
     body: JSON.stringify(body),
   });
   if (!res.ok) {

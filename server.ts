@@ -1157,7 +1157,7 @@ async function startServer() {
       delete safeEmployee.password;
 
       await auditLog('auth_login_success', employeeId, emp.email, { ip: req.ip });
-      res.json({ ok: true, token: sessionToken, employee: safeEmployee });
+      res.json({ ok: true, employee: safeEmployee });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
