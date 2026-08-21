@@ -589,9 +589,9 @@ export async function auditLog(eventType: string, userId: string, userEmail: str
 }
 
 // In-memory session store (validated server-side)
-const serverSessions = new Map<string, { employeeId: string; expiresAt: number }>();
+export const serverSessions = new Map<string, { employeeId: string; expiresAt: number }>();
 
-function generateSessionToken(): string {
+export function generateSessionToken(): string {
   return crypto.randomBytes(32).toString('hex');
 }
 
@@ -602,6 +602,59 @@ export function cleanExpiredSessions() {
   }
 }
 setInterval(cleanExpiredSessions, 10 * 60 * 1000);
+
+export function parseCookies(cookieHeader?: string): Record<string, string> {
+  const list: Record<string, string> = {};
+  if (!cookieHeader) return list;
+  cookieHeader.split(';').forEach(cookie => {
+    const parts = cookie.split('=');
+    if (parts.length >= 2) {
+      const name = parts[0].trim();
+      const val = parts.slice(1).join('=').trim();
+      if (name) list[name] = decodeURIComponent(val);
+    }
+  });
+  return list;
+}
+
+export function buildSessionCookieHeader(token: string, isProduction: boolean, maxAgeMs = 24 * 60 * 60 * 1000): string {
+  const parts = [
+    `taiba_session=${encodeURIComponent(token)}`,
+    'HttpOnly',
+    'Path=/',
+    'SameSite=Strict',
+    `Max-Age=${Math.floor(maxAgeMs / 1000)}`,
+  ];
+  if (isProduction) {
+    parts.push('Secure');
+  }
+  return parts.join('; ');
+}
+
+export function buildClearSessionCookieHeader(isProduction: boolean): string {
+  const parts = [
+    'taiba_session=',
+    'HttpOnly',
+    'Path=/',
+    'SameSite=Strict',
+    'Max-Age=0',
+    'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+  ];
+  if (isProduction) {
+    parts.push('Secure');
+  }
+  return parts.join('; ');
+}
+
+export function setSessionCookie(res: express.Response, token: string, maxAgeMs = 24 * 60 * 60 * 1000) {
+  const isProduction = process.env.NODE_ENV === 'production';
+  res.setHeader('Set-Cookie', buildSessionCookieHeader(token, isProduction, maxAgeMs));
+}
+
+export function clearSessionCookie(res: express.Response) {
+  const isProduction = process.env.NODE_ENV === 'production';
+  res.setHeader('Set-Cookie', buildClearSessionCookieHeader(isProduction));
+}
 
 // ---- Firestore batch commit helper (for legacy and maintenance operations) ----
 
@@ -909,11 +962,19 @@ async function startServer() {
 
   // Auth Middleware
   async function requireFirebaseAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Missing or invalid authorization header" });
+    const cookies = parseCookies(req.headers.cookie);
+    let token = cookies['taiba_session'];
+
+    if (!token) {
+      const authHeader = req.headers.authorization;
+      if (authHeader?.startsWith("Bearer ")) {
+        token = authHeader.split("Bearer ")[1];
+      }
     }
-    const token = authHeader.split("Bearer ")[1];
+
+    if (!token) {
+      return res.status(401).json({ error: "Missing or invalid authorization session" });
+    }
 
     if (token.startsWith('sess_')) {
       const session = serverSessions.get(token);
@@ -1089,12 +1150,45 @@ async function startServer() {
       const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
       serverSessions.set(sessionToken, { employeeId, expiresAt });
 
+      setSessionCookie(res, sessionToken, 24 * 60 * 60 * 1000);
+
       const safeEmployee = { ...emp };
       delete safeEmployee.passwordHash;
       delete safeEmployee.password;
 
       await auditLog('auth_login_success', employeeId, emp.email, { ip: req.ip });
-      res.json({ token: sessionToken, employee: safeEmployee });
+      res.json({ ok: true, token: sessionToken, employee: safeEmployee });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/auth/logout", async (req, res) => {
+    try {
+      const cookies = parseCookies(req.headers.cookie);
+      let token = cookies['taiba_session'];
+      if (!token) {
+        const authHeader = req.headers.authorization;
+        if (authHeader?.startsWith("Bearer ")) {
+          token = authHeader.split("Bearer ")[1];
+        }
+      }
+      if (token && token.startsWith('sess_')) {
+        serverSessions.delete(token);
+      }
+      clearSessionCookie(res);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/auth/me", requireFirebaseAuth, async (req, res) => {
+    try {
+      const safeEmployee = { ...req.employee };
+      delete safeEmployee.passwordHash;
+      delete safeEmployee.password;
+      res.json({ ok: true, employee: safeEmployee });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

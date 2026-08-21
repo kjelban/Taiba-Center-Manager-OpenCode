@@ -42,11 +42,13 @@ export const AttendanceService = {
 
   getActiveSession: async (employeeId?: string): Promise<Attendance | null> => {
     const token = getServerSessionToken();
-    if (!token) return null;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
     try {
       const resp = await fetch('/api/attendance/active', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        headers,
+        credentials: 'same-origin',
         body: JSON.stringify({ employeeId }),
       });
       if (!resp.ok) return null;
@@ -59,10 +61,12 @@ export const AttendanceService = {
 
   clockIn: async (employee: Employee): Promise<Attendance> => {
     const token = getServerSessionToken();
-    if (!token) throw new Error('Not authenticated');
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
     const resp = await fetch('/api/clockin', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers,
+      credentials: 'same-origin',
       body: JSON.stringify({ employeeId: employee.id, employeeName: employee.name }),
     });
     if (!resp.ok) {
@@ -75,10 +79,12 @@ export const AttendanceService = {
 
   clockOut: async (recordId: string): Promise<void> => {
     const token = getServerSessionToken();
-    if (!token) throw new Error('Not authenticated');
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
     const resp = await fetch('/api/clockout', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers,
+      credentials: 'same-origin',
       body: JSON.stringify({ attendanceId: recordId, id: recordId }),
     });
     if (!resp.ok) {

@@ -51,13 +51,26 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           setIsInitialLoading(false);
           return;
         }
-        const employee: Employee = JSON.parse(storedUser);
+        // Verify session validity against server /api/auth/me
+        const checkResp = await fetch('/api/auth/me', {
+          credentials: 'same-origin',
+        });
+        if (!checkResp.ok) {
+          localStorage.removeItem(STORAGE_KEY_USER);
+          localStorage.removeItem(STORAGE_KEY_SESSION);
+          localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
+          setCurrentUser(null);
+          setIsInitialLoading(false);
+          return;
+        }
 
-        const fresh = await EmployeeService.getEmployee(employee.id);
+        const data = await checkResp.json();
+        const fresh: Employee = data.employee;
         if (!fresh) {
           localStorage.removeItem(STORAGE_KEY_USER);
           localStorage.removeItem(STORAGE_KEY_SESSION);
           localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
+          setCurrentUser(null);
           setIsInitialLoading(false);
           return;
         }

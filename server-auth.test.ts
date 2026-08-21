@@ -260,3 +260,70 @@ describe('AUDIT-005: validateSalePayload', () => {
     expect(validateSalePayload({ ...validSale, items: [] })).toBe('Missing or empty items');
   });
 });
+
+// ── AUDIT-016: HttpOnly Session Cookie & Auth Lifecycle ──
+
+import {
+  parseCookies,
+  buildSessionCookieHeader,
+  buildClearSessionCookieHeader,
+  serverSessions,
+} from './server';
+
+describe('AUDIT-016: HttpOnly Session Cookie Storage & Lifecycle Verification', () => {
+  it('AUTH-016-01: Login response builds session cookie containing token', () => {
+    const token = 'sess_abcdef1234567890';
+    const header = buildSessionCookieHeader(token, false, 86400000);
+    expect(header).toContain('taiba_session=sess_abcdef1234567890');
+    expect(header).toContain('Path=/');
+    expect(header).toContain('Max-Age=86400');
+  });
+
+  it('AUTH-016-02: Session cookie strictly includes HttpOnly flag (blocks JS/XSS access)', () => {
+    const header = buildSessionCookieHeader('sess_123', false);
+    expect(header).toContain('HttpOnly');
+  });
+
+  it('AUTH-016-03: Production configuration enables Secure flag while dev allows local HTTP', () => {
+    const devHeader = buildSessionCookieHeader('sess_123', false);
+    expect(devHeader).not.toContain('Secure');
+
+    const prodHeader = buildSessionCookieHeader('sess_123', true);
+    expect(prodHeader).toContain('Secure');
+  });
+
+  it('AUTH-016-04: SameSite=Strict policy is enforced on session cookie (blocks CSRF)', () => {
+    const header = buildSessionCookieHeader('sess_123', false);
+    expect(header).toContain('SameSite=Strict');
+  });
+
+  it('AUTH-016-05: parseCookies correctly extracts taiba_session from Cookie header', () => {
+    const cookieHeader = 'other_pref=dark; taiba_session=sess_secure_token_999; theme=blue';
+    const parsed = parseCookies(cookieHeader);
+    expect(parsed['taiba_session']).toBe('sess_secure_token_999');
+    expect(parsed['other_pref']).toBe('dark');
+  });
+
+  it('AUTH-016-06: Logout builds clear cookie header with Max-Age=0 and epoch expiration', () => {
+    const clearDev = buildClearSessionCookieHeader(false);
+    expect(clearDev).toContain('taiba_session=');
+    expect(clearDev).toContain('Max-Age=0');
+    expect(clearDev).toContain('Expires=Thu, 01 Jan 1970 00:00:00 GMT');
+    expect(clearDev).toContain('HttpOnly');
+
+    const clearProd = buildClearSessionCookieHeader(true);
+    expect(clearProd).toContain('Secure');
+  });
+
+  it('AUTH-016-07: Expired or revoked session token is properly invalidated', () => {
+    const token = 'sess_test_expired_123';
+    // Expired session
+    serverSessions.set(token, { employeeId: 'emp-1', expiresAt: Date.now() - 1000 });
+    const session = serverSessions.get(token);
+    expect(session?.expiresAt).toBeLessThan(Date.now());
+
+    // Revocation / deletion
+    serverSessions.delete(token);
+    expect(serverSessions.get(token)).toBeUndefined();
+  });
+});

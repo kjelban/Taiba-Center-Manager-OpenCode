@@ -1,53 +1,46 @@
 import { db } from './firebase';
 import { collection, getDocs, onSnapshot } from 'firebase/firestore';
 
-const STORAGE_KEY_AUTH_TOKEN = 'taiba_auth_token';
-
-// Server session token (set after login via /api/auth/login, persisted across refreshes)
-let serverSessionToken: string | null = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY_AUTH_TOKEN) : null;
+// Server session token (in-memory only; Web UI authenticates authoritatively via HttpOnly cookies)
+let serverSessionToken: string | null = null;
 
 export function setServerSessionToken(token: string | null) {
   serverSessionToken = token;
   if (typeof localStorage !== 'undefined') {
-    if (token) {
-      localStorage.setItem(STORAGE_KEY_AUTH_TOKEN, token);
-    } else {
-      localStorage.removeItem(STORAGE_KEY_AUTH_TOKEN);
-    }
+    // Proactively remove legacy key if previously present
+    localStorage.removeItem('taiba_auth_token');
   }
 }
 
 export function getServerSessionToken(): string | null {
-  if (!serverSessionToken && typeof localStorage !== 'undefined') {
-    serverSessionToken = localStorage.getItem(STORAGE_KEY_AUTH_TOKEN);
-  }
   return serverSessionToken;
 }
 
 export async function logoutSession(): Promise<void> {
   try {
-    const token = getServerSessionToken();
-    if (token) {
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-    }
+    const token = serverSessionToken;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers,
+      credentials: 'same-origin',
+    });
   } catch {}
   setServerSessionToken(null);
 }
 
-async function getIdToken(): Promise<string> {
-  if (serverSessionToken) return serverSessionToken;
-  throw new Error('Not authenticated');
-}
-
 async function doFetch(url: string, body: any): Promise<boolean> {
   try {
-    const token = await getIdToken();
+    const token = getServerSessionToken();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers,
+      credentials: 'same-origin',
       body: JSON.stringify(body),
     });
     if (!res.ok) {
@@ -69,10 +62,13 @@ async function proxyDelete(collectionName: string, id: string): Promise<boolean>
 }
 export async function proxyGet<T>(path: string): Promise<T | null> {
   try {
-    const token = await getIdToken();
+    const token = getServerSessionToken();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
     const res = await fetch('/api/proxy/get', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers,
+      credentials: 'same-origin',
       body: JSON.stringify({ path }),
     });
     return res.ok ? (await res.json() as T) : null;

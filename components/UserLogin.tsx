@@ -71,6 +71,7 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
         const loginResp = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
           body: JSON.stringify({ email: selectedEmail, password }),
         });
         const loginData = await loginResp.json();
@@ -80,7 +81,7 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
           return;
         }
 
-        setServerSessionToken(loginData.sessionToken);
+        setServerSessionToken(loginData.token || loginData.sessionToken || null);
         onLogin(loginData.employee);
         return;
       }
@@ -99,6 +100,7 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
       const loginResp = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({ email: selectedEmail, password }),
       });
       const loginData = await loginResp.json();
@@ -108,7 +110,7 @@ const UserLogin: React.FC<UserLoginProps> = ({ onLogin }) => {
         return;
       }
 
-      setServerSessionToken(loginData.sessionToken);
+      setServerSessionToken(loginData.token || loginData.sessionToken || null);
       onLogin(loginData.employee);
     } catch (err: any) {
       console.error('Login error:', err);
