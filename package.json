@@ -18,7 +18,7 @@
     "dotenv": "^17.4.2",
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
-    "express-rate-limit": "^8.5.2",
+    "express-rate-limit": "^8.6.2",
     "firebase": "^12.15.0",
     "helmet": "^8.2.0",
     "html5-qrcode": "^2.3.8",
@@ -42,5 +42,19 @@
     "typescript": "~5.8.2",
     "vite": "^6.4.3",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "brace-expansion": "^1.1.18",
+    "@typescript-eslint/typescript-estree": {
+      "brace-expansion": "^5.0.9"
+    },
+    "readdir-glob": {
+      "brace-expansion": "^2.1.4"
+    },
+    "ip-address": "^10.5.0",
+    "nanoid": "^3.3.18",
+    "postcss": "^8.5.26",
+    "protobufjs": "^7.6.5",
+    "uuid": "^11.1.1"
   }
 }
