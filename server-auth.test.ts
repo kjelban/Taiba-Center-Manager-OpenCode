@@ -370,3 +370,89 @@ describe('AUDIT-016: HttpOnly Session Cookie Storage & Lifecycle Verification', 
     serverSessions.delete(token);
   });
 });
+
+// ── AUDIT-012: Backup Payload Validation & Checksum Unit Tests ──
+
+import {
+  validateBackupPayload,
+  computeBackupChecksum,
+} from './server';
+
+describe('AUDIT-012: Backup Validation & Integrity Unit Tests', () => {
+  it('AUTH-012-UNIT-01: Rejects null, non-object, and array payloads', () => {
+    expect(validateBackupPayload(null).valid).toBe(false);
+    expect(validateBackupPayload(undefined).valid).toBe(false);
+    expect(validateBackupPayload('string').valid).toBe(false);
+    expect(validateBackupPayload([]).valid).toBe(false);
+  });
+
+  it('AUTH-012-UNIT-02: Rejects prototype pollution keys', () => {
+    const polluted = JSON.parse('{"__proto__": {"admin": true}, "products": []}');
+    const result = validateBackupPayload(polluted);
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain('Prototype pollution');
+  });
+
+  it('AUTH-012-UNIT-03: Rejects disallowed or unknown collections', () => {
+    const payload = {
+      collections: {
+        products: [],
+        malicious_collection: [{ id: '1' }]
+      }
+    };
+    const result = validateBackupPayload(payload);
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain('Disallowed or unknown collection');
+  });
+
+  it('AUTH-012-UNIT-04: Rejects duplicate document IDs within the same collection', () => {
+    const payload = {
+      collections: {
+        products: [
+          { id: 'p1', name: 'قميص 1', sellingPrice: 50, costPrice: 30, stock: 5 },
+          { id: 'p1', name: 'قميص 2 مكرر', sellingPrice: 50, costPrice: 30, stock: 5 },
+        ]
+      }
+    };
+    const result = validateBackupPayload(payload);
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain('Duplicate document ID "p1"');
+  });
+
+  it('AUTH-012-UNIT-05: Rejects invalid data types in entity fields', () => {
+    const payload = {
+      collections: {
+        products: [
+          { id: 'p1', name: 'قميص', sellingPrice: 'خمسون', costPrice: 30, stock: 5 } // Invalid sellingPrice
+        ]
+      }
+    };
+    const result = validateBackupPayload(payload);
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain('invalid "sellingPrice"');
+  });
+
+  it('AUTH-012-UNIT-06: Computes deterministic SHA-256 checksum regardless of key insertion order', () => {
+    const data1 = { products: [{ id: 'p1' }], sales: [{ id: 's1' }] };
+    const data2 = { sales: [{ id: 's1' }], products: [{ id: 'p1' }] };
+
+    const hash1 = computeBackupChecksum(data1);
+    const hash2 = computeBackupChecksum(data2);
+
+    expect(hash1).toBe(hash2);
+    expect(hash1.length).toBe(64);
+  });
+
+  it('AUTH-012-UNIT-07: Successfully normalizes legacy flat backup format into V1 format', () => {
+    const legacy = {
+      products: [{ id: 'p1', name: 'بلوزة', sellingPrice: 30, costPrice: 15, stock: 10 }],
+      categories: ['بناتي', 'ولادي'],
+      timestamp: '2026-08-21T10:00:00Z',
+    };
+    const result = validateBackupPayload(legacy);
+    expect(result.valid).toBe(true);
+    expect(result.normalized?.metadata.formatVersion).toBe(1);
+    expect(result.normalized?.collections.products.length).toBe(1);
+    expect(result.normalized?.collections.categories).toEqual(['بناتي', 'ولادي']);
+  });
+});

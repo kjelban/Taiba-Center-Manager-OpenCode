@@ -71,17 +71,35 @@ export const BackupService = {
   },
 
   getAllData: async (): Promise<string> => {
+    try {
+      const resp = await fetch('/api/backup/export', {
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        return JSON.stringify(data, null, 2);
+      }
+    } catch {}
+
+    // Client-side fallback if offline / standalone
     const data = {
-      products: await ProductService.getProducts(),
-      sales: await SaleService.getSales(),
-      expenses: await ExpenseService.getExpenses(),
-      employees: await EmployeeService.getEmployees(),
-      customers: await CustomerService.getCustomers(),
-      attendance: await AttendanceService.getAttendance(),
-      suppliers: await SupplierService.getSuppliers(),
-      categories: await CategoryService.getCategories(),
-      seasons: await CategoryService.getSeasons(),
-      timestamp: new Date().toISOString()
+      metadata: {
+        formatVersion: 1,
+        createdAt: new Date().toISOString(),
+        app: 'Taiba Center Manager',
+      },
+      collections: {
+        products: await ProductService.getProducts(),
+        sales: await SaleService.getSales(),
+        expenses: await ExpenseService.getExpenses(),
+        employees: await EmployeeService.getEmployees(),
+        customers: await CustomerService.getCustomers(),
+        attendance: await AttendanceService.getAttendance(),
+        suppliers: await SupplierService.getSuppliers(),
+        categories: await CategoryService.getCategories(),
+        seasons: await CategoryService.getSeasons(),
+      }
     };
     return JSON.stringify(data, null, 2);
   },
@@ -89,8 +107,9 @@ export const BackupService = {
   restoreData: async (jsonString: string): Promise<boolean> => {
     try {
       const backupData = JSON.parse(jsonString);
-      const hasPreMigrationEmployees = Array.isArray(backupData.employees) &&
-        backupData.employees.some((e: any) => e.password);
+      const employees = backupData.collections?.employees || backupData.employees;
+      const hasPreMigrationEmployees = Array.isArray(employees) &&
+        employees.some((e: any) => e.password);
 
       if (hasPreMigrationEmployees) {
         console.warn("Backup contains pre-migration employees with password fields. Employee IDs may not match Firebase Auth UIDs after restore.");

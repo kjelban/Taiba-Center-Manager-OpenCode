@@ -658,26 +658,580 @@ export function clearSessionCookie(res: express.Response) {
 
 // ---- Firestore batch commit helper (for legacy and maintenance operations) ----
 
-export async function firestoreCommit(writes: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[]): Promise<void> {
+// ---- Firestore batch commit & listing helpers (AUDIT-012 Safe Operations) ----
+
+export async function firestoreCommit(
+  writes: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[],
+  batchSize = 400
+): Promise<void> {
   if (writes.length === 0) return;
   const token = await getGoogleAccessToken();
   const baseUrl = getFirestoreBaseUrl();
   const dbPath = getFirestoreDbPath();
-  const batchBody: any = {
-    writes: writes.map(w => {
-      if (w.type === 'delete') {
-        return { delete: `${dbPath}/documents/${w.collection}/${w.id}` };
+
+  for (let i = 0; i < writes.length; i += batchSize) {
+    const chunk = writes.slice(i, i + batchSize);
+    const batchBody: any = {
+      writes: chunk.map(w => {
+        if (w.type === 'delete') {
+          return { delete: `${dbPath}/documents/${w.collection}/${w.id}` };
+        }
+        const fields = jsToFirestoreValue(w.data || {}).mapValue.fields;
+        return { update: { name: `${dbPath}/documents/${w.collection}/${w.id}`, fields } };
+      }),
+    };
+    const resp = await fetch(`${baseUrl}/documents:commit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(batchBody),
+    });
+    if (!resp.ok) throw new Error(`Firestore commit failed: ${resp.status} ${await resp.text()}`);
+  }
+}
+
+export async function firestoreListCollectionDocuments(collectionName: string): Promise<any[]> {
+  const token = await getGoogleAccessToken();
+  const baseUrl = getFirestoreBaseUrl();
+  const docs: any[] = [];
+  let pageToken: string | undefined;
+
+  do {
+    const url = new URL(`${baseUrl}/documents/${collectionName}`);
+    url.searchParams.set('pageSize', '300');
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+
+    const resp = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    if (resp.status === 404) break;
+    if (!resp.ok) {
+      throw new Error(`Failed to list collection "${collectionName}": ${resp.status} ${await resp.text()}`);
+    }
+
+    const data = await resp.json() as any;
+    if (data.documents && Array.isArray(data.documents)) {
+      for (const d of data.documents) {
+        const id = d.name.split('/').pop();
+        const item: Record<string, any> = { id };
+        if (d.fields) {
+          for (const [k, v] of Object.entries(d.fields)) {
+            item[k] = firestoreValueToJs(v as any);
+          }
+        }
+        docs.push(item);
       }
-      const fields = jsToFirestoreValue(w.data || {}).mapValue.fields;
-      return { update: { name: `${dbPath}/documents/${w.collection}/${w.id}`, fields } };
-    }),
+    }
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  return docs;
+}
+
+// ── AUDIT-012: Backup Format, Validation, Lock State Machine & Compensating Rollback ──
+
+export const MANAGED_ENTITY_COLLECTIONS = [
+  'products',
+  'sales',
+  'expenses',
+  'employees',
+  'customers',
+  'suppliers',
+  'attendance'
+] as const;
+
+export const MANAGED_SINGLETON_COLLECTIONS = [
+  'categories',
+  'seasons'
+] as const;
+
+export const ALL_MANAGED_COLLECTIONS = [
+  ...MANAGED_ENTITY_COLLECTIONS,
+  ...MANAGED_SINGLETON_COLLECTIONS
+] as const;
+
+export type RestoreLockState = 'IDLE' | 'PREPARING' | 'RESTORING' | 'VERIFYING' | 'ROLLING_BACK' | 'FAILED';
+
+export interface RestoreLockInfo {
+  state: RestoreLockState;
+  opId: string;
+  startedAt: number;
+  initiatedBy?: string;
+  lastError?: string;
+}
+
+let activeRestoreLock: RestoreLockInfo | null = null;
+let testFaultInjectionAfterWrites: number | null = null;
+
+export function getRestoreLock(): RestoreLockInfo | null {
+  if (activeRestoreLock && (Date.now() - activeRestoreLock.startedAt > 5 * 60 * 1000)) {
+    // Auto-expire stale lock after 5 minutes
+    activeRestoreLock = null;
+  }
+  return activeRestoreLock;
+}
+
+export function setRestoreLock(info: RestoreLockInfo | null): void {
+  activeRestoreLock = info;
+}
+
+export function clearRestoreLock(): void {
+  activeRestoreLock = null;
+}
+
+export function setTestRestoreFaultInjection(writesThreshold: number | null): void {
+  testFaultInjectionAfterWrites = writesThreshold;
+}
+
+export function computeBackupChecksum(collectionsData: Record<string, any>): string {
+  // Canonical key ordering for deterministic checksum calculation
+  const sortedKeys = Object.keys(collectionsData).sort();
+  const canonicalObj: Record<string, any> = {};
+  for (const k of sortedKeys) {
+    canonicalObj[k] = collectionsData[k];
+  }
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalObj)).digest('hex');
+}
+
+export interface NormalizedBackup {
+  metadata: {
+    formatVersion: number;
+    createdAt: string;
+    app: string;
+    counts: Record<string, number>;
+    checksum?: string;
   };
-  const resp = await fetch(`${baseUrl}/documents:commit`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(batchBody),
+  collections: {
+    products: any[];
+    sales: any[];
+    expenses: any[];
+    employees: any[];
+    customers: any[];
+    suppliers: any[];
+    attendance: any[];
+    categories: string[];
+    seasons: string[];
+  };
+}
+
+export function validateBackupPayload(payload: any): { valid: boolean; error?: string; normalized?: NormalizedBackup } {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { valid: false, error: 'Backup payload must be a non-null JSON object' };
+  }
+
+  // Guard against prototype pollution
+  const jsonStr = JSON.stringify(payload);
+  if (jsonStr.includes('"__proto__"') || jsonStr.includes('"constructor"') || jsonStr.includes('"prototype"')) {
+    return { valid: false, error: 'Prototype pollution attempt detected in backup payload' };
+  }
+
+  let collectionsInput: any;
+  let metadataInput: any;
+
+  if (payload.collections && typeof payload.collections === 'object') {
+    collectionsInput = payload.collections;
+    metadataInput = payload.metadata;
+  } else {
+    // Legacy format compatibility (flat structure)
+    collectionsInput = payload;
+    metadataInput = {
+      formatVersion: 1,
+      createdAt: payload.timestamp || new Date().toISOString(),
+      app: 'Taiba Center Manager',
+    };
+  }
+
+  if (metadataInput && metadataInput.formatVersion !== undefined) {
+    if (typeof metadataInput.formatVersion !== 'number' || metadataInput.formatVersion > 1 || metadataInput.formatVersion < 1) {
+      return { valid: false, error: `Unsupported backup formatVersion: ${metadataInput.formatVersion}` };
+    }
+  }
+
+  // Validate collection keys (reject unknown top-level collection names)
+  const allowedKeys = new Set([...ALL_MANAGED_COLLECTIONS, 'metadata', 'timestamp']);
+  for (const key of Object.keys(collectionsInput)) {
+    if (!allowedKeys.has(key as any)) {
+      return { valid: false, error: `Disallowed or unknown collection in backup: "${key}"` };
+    }
+  }
+
+  const normalized: NormalizedBackup = {
+    metadata: {
+      formatVersion: 1,
+      createdAt: metadataInput?.createdAt || new Date().toISOString(),
+      app: 'Taiba Center Manager',
+      counts: {},
+      checksum: metadataInput?.checksum,
+    },
+    collections: {
+      products: [],
+      sales: [],
+      expenses: [],
+      employees: [],
+      customers: [],
+      suppliers: [],
+      attendance: [],
+      categories: [],
+      seasons: [],
+    }
+  };
+
+  // Validate Entity Collections
+  for (const collName of MANAGED_ENTITY_COLLECTIONS) {
+    const rawItems = collectionsInput[collName];
+    if (rawItems === undefined) {
+      normalized.collections[collName] = [];
+      normalized.metadata.counts[collName] = 0;
+      continue;
+    }
+    if (!Array.isArray(rawItems)) {
+      return { valid: false, error: `Collection "${collName}" must be an array of documents` };
+    }
+
+    const seenIds = new Set<string>();
+    const validatedItems: any[] = [];
+
+    for (let i = 0; i < rawItems.length; i++) {
+      const doc = rawItems[i];
+      if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+        return { valid: false, error: `Item at index ${i} in "${collName}" is not a valid object` };
+      }
+      if (!doc.id || typeof doc.id !== 'string' || !isValidDocumentId(doc.id)) {
+        return { valid: false, error: `Item at index ${i} in "${collName}" has invalid or missing "id"` };
+      }
+      if (seenIds.has(doc.id)) {
+        return { valid: false, error: `Duplicate document ID "${doc.id}" found in "${collName}"` };
+      }
+      seenIds.add(doc.id);
+
+      // Schema Type & Required Field Validations
+      if (collName === 'products') {
+        if (!doc.name || typeof doc.name !== 'string') {
+          return { valid: false, error: `Product "${doc.id}" missing valid "name"` };
+        }
+        if (typeof doc.sellingPrice !== 'number' || isNaN(doc.sellingPrice) || doc.sellingPrice < 0) {
+          return { valid: false, error: `Product "${doc.id}" has invalid "sellingPrice"` };
+        }
+        if (typeof doc.costPrice !== 'number' || isNaN(doc.costPrice) || doc.costPrice < 0) {
+          return { valid: false, error: `Product "${doc.id}" has invalid "costPrice"` };
+        }
+      } else if (collName === 'sales') {
+        if (!Array.isArray(doc.items) || doc.items.length === 0) {
+          return { valid: false, error: `Sale "${doc.id}" must contain non-empty "items" array` };
+        }
+        if (typeof doc.totalAmount !== 'number' || isNaN(doc.totalAmount)) {
+          return { valid: false, error: `Sale "${doc.id}" has invalid "totalAmount"` };
+        }
+      } else if (collName === 'employees') {
+        if (!doc.name || typeof doc.name !== 'string') {
+          return { valid: false, error: `Employee "${doc.id}" missing valid "name"` };
+        }
+        if (!doc.email || typeof doc.email !== 'string') {
+          return { valid: false, error: `Employee "${doc.id}" missing valid "email"` };
+        }
+      } else if (collName === 'customers') {
+        if (!doc.name || typeof doc.name !== 'string') {
+          return { valid: false, error: `Customer "${doc.id}" missing valid "name"` };
+        }
+      } else if (collName === 'expenses') {
+        if (typeof doc.amount !== 'number' || isNaN(doc.amount) || doc.amount < 0) {
+          return { valid: false, error: `Expense "${doc.id}" has invalid "amount"` };
+        }
+      } else if (collName === 'attendance') {
+        if (!doc.employeeId || typeof doc.employeeId !== 'string') {
+          return { valid: false, error: `Attendance "${doc.id}" missing "employeeId"` };
+        }
+      }
+
+      validatedItems.push(doc);
+    }
+
+    normalized.collections[collName] = validatedItems;
+    normalized.metadata.counts[collName] = validatedItems.length;
+  }
+
+  // Validate Singleton Collections (categories, seasons)
+  for (const singleColl of MANAGED_SINGLETON_COLLECTIONS) {
+    const rawVal = collectionsInput[singleColl];
+    if (rawVal === undefined) {
+      normalized.collections[singleColl] = [];
+      normalized.metadata.counts[singleColl] = 0;
+      continue;
+    }
+
+    let itemsList: string[] = [];
+    if (Array.isArray(rawVal)) {
+      itemsList = rawVal.filter((x): x is string => typeof x === 'string');
+    } else if (rawVal && typeof rawVal === 'object' && Array.isArray(rawVal.items)) {
+      itemsList = rawVal.items.filter((x: any): x is string => typeof x === 'string');
+    } else {
+      return { valid: false, error: `Collection "${singleColl}" must be an array or { items: string[] }` };
+    }
+
+    normalized.collections[singleColl] = itemsList;
+    normalized.metadata.counts[singleColl] = itemsList.length;
+  }
+
+  return { valid: true, normalized };
+}
+
+export async function capturePreRestoreSnapshot(): Promise<Record<string, any>> {
+  const snapshot: Record<string, any> = {};
+
+  for (const coll of MANAGED_ENTITY_COLLECTIONS) {
+    snapshot[coll] = await firestoreListCollectionDocuments(coll);
+  }
+
+  for (const singleColl of MANAGED_SINGLETON_COLLECTIONS) {
+    const doc = await firestoreGetDocument(`${singleColl}/all`);
+    snapshot[singleColl] = (doc && Array.isArray(doc.items)) ? doc.items : [];
+  }
+
+  return snapshot;
+}
+
+export async function executeFailureSafeRestore(
+  rawBackupPayload: any,
+  options?: { initiatedBy?: string; faultInjectionAfterWritesCount?: number }
+): Promise<{ ok: boolean; stats: { restoredCounts: Record<string, number>; deletedCounts: Record<string, number> } }> {
+  // 1. MUTUAL EXCLUSION & LOCK CHECK
+  const currentLock = getRestoreLock();
+  if (currentLock && currentLock.state !== 'IDLE') {
+    const err: any = new Error('A database restore operation is already in progress');
+    err.status = 409;
+    err.code = 'RESTORE_ALREADY_IN_PROGRESS';
+    err.lock = currentLock;
+    throw err;
+  }
+
+  const opId = 'res_' + crypto.randomUUID();
+  setRestoreLock({
+    state: 'PREPARING',
+    opId,
+    startedAt: Date.now(),
+    initiatedBy: options?.initiatedBy || 'admin',
   });
-  if (!resp.ok) throw new Error(`Firestore commit failed: ${resp.status} ${await resp.text()}`);
+
+  let preRestoreSnapshot: Record<string, any> | null = null;
+
+  try {
+    // 2. SCHEMA & PAYLOAD VALIDATION (Strict Pre-Flight Check)
+    const validation = validateBackupPayload(rawBackupPayload);
+    if (!validation.valid || !validation.normalized) {
+      const err: any = new Error(`Backup validation failed: ${validation.error}`);
+      err.status = 400;
+      err.code = 'INVALID_BACKUP_SCHEMA';
+      throw err;
+    }
+
+    const normalized = validation.normalized;
+
+    // 3. PRE-RESTORE DURABLE SNAPSHOT CAPTURE
+    preRestoreSnapshot = await capturePreRestoreSnapshot();
+
+    // 4. RESTORATION MUTATION PHASE (Exact Replacement Semantics)
+    setRestoreLock({
+      state: 'RESTORING',
+      opId,
+      startedAt: Date.now(),
+      initiatedBy: options?.initiatedBy || 'admin',
+    });
+
+    let totalWritesExecuted = 0;
+    const deletedCounts: Record<string, number> = {};
+    const restoredCounts: Record<string, number> = {};
+    const faultThreshold = options?.faultInjectionAfterWritesCount ?? testFaultInjectionAfterWrites;
+
+    // Apply entity collections
+    for (const collName of MANAGED_ENTITY_COLLECTIONS) {
+      const currentDocs = preRestoreSnapshot[collName] || [];
+      const backupItems = normalized.collections[collName] || [];
+      const backupIdSet = new Set(backupItems.map((item: any) => item.id));
+
+      const writes: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[] = [];
+
+      // Calculate Deletions (docs currently in DB not in backup)
+      let deletedForColl = 0;
+      for (const curDoc of currentDocs) {
+        if (!backupIdSet.has(curDoc.id)) {
+          writes.push({ type: 'delete', collection: collName, id: curDoc.id });
+          deletedForColl++;
+        }
+      }
+      deletedCounts[collName] = deletedForColl;
+
+      // Calculate Sets (docs in backup)
+      for (const item of backupItems) {
+        writes.push({ type: 'set', collection: collName, id: item.id, data: item });
+      }
+      restoredCounts[collName] = backupItems.length;
+
+      // Check Fault Injection before committing
+      if (faultThreshold !== null && (totalWritesExecuted + writes.length) > faultThreshold) {
+        // Execute partial chunk up to threshold to simulate mid-restore failure
+        const partialWrites = writes.slice(0, Math.max(1, faultThreshold - totalWritesExecuted));
+        if (partialWrites.length > 0) {
+          await firestoreCommit(partialWrites);
+        }
+        throw new Error('TEST_FAULT_INJECTION: Mid-restore simulated network/process abort');
+      }
+
+      await firestoreCommit(writes);
+      totalWritesExecuted += writes.length;
+    }
+
+    // Apply singleton collections
+    for (const singleColl of MANAGED_SINGLETON_COLLECTIONS) {
+      const itemsList = normalized.collections[singleColl] || [];
+      await firestoreSetDocument(singleColl, 'all', { items: itemsList });
+      restoredCounts[singleColl] = itemsList.length;
+    }
+
+    // 5. POST-RESTORE VERIFICATION PHASE
+    setRestoreLock({
+      state: 'VERIFYING',
+      opId,
+      startedAt: Date.now(),
+      initiatedBy: options?.initiatedBy || 'admin',
+    });
+
+    for (const collName of MANAGED_ENTITY_COLLECTIONS) {
+      const rereadDocs = await firestoreListCollectionDocuments(collName);
+      const expectedCount = normalized.collections[collName].length;
+      if (rereadDocs.length !== expectedCount) {
+        throw new Error(`Post-restore verification mismatch on "${collName}": expected ${expectedCount} docs, found ${rereadDocs.length}`);
+      }
+      const expectedIds = new Set(normalized.collections[collName].map((x: any) => x.id));
+      for (const d of rereadDocs) {
+        if (!expectedIds.has(d.id)) {
+          throw new Error(`Post-restore verification failed: unexpected extra document "${d.id}" in "${collName}"`);
+        }
+      }
+    }
+
+    // 6. SUCCESS & LOCK RELEASE
+    clearRestoreLock();
+    return { ok: true, stats: { restoredCounts, deletedCounts } };
+  } catch (error: any) {
+    // 7. COMPENSATING ROLLBACK PHASE (Failure Recovery)
+    if (preRestoreSnapshot) {
+      setRestoreLock({
+        state: 'ROLLING_BACK',
+        opId,
+        startedAt: Date.now(),
+        initiatedBy: options?.initiatedBy || 'admin',
+        lastError: error.message,
+      });
+
+      try {
+        console.warn(`[AUDIT-012] Restore aborted (${error.message}). Executing automated compensating rollback...`);
+
+        for (const collName of MANAGED_ENTITY_COLLECTIONS) {
+          const currentDocsInDb = await firestoreListCollectionDocuments(collName);
+          const originalDocs = preRestoreSnapshot[collName] || [];
+          const originalIdSet = new Set(originalDocs.map((x: any) => x.id));
+
+          const rollbackWrites: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[] = [];
+
+          // Delete docs that were written during partial restore but were not originally present
+          for (const cur of currentDocsInDb) {
+            if (!originalIdSet.has(cur.id)) {
+              rollbackWrites.push({ type: 'delete', collection: collName, id: cur.id });
+            }
+          }
+
+          // Re-write all original snapshot documents
+          for (const orig of originalDocs) {
+            rollbackWrites.push({ type: 'set', collection: collName, id: orig.id, data: orig });
+          }
+
+          await firestoreCommit(rollbackWrites);
+        }
+
+        for (const singleColl of MANAGED_SINGLETON_COLLECTIONS) {
+          const origItems = preRestoreSnapshot[singleColl] || [];
+          await firestoreSetDocument(singleColl, 'all', { items: origItems });
+        }
+
+        // Verify Rollback Reread
+        for (const collName of MANAGED_ENTITY_COLLECTIONS) {
+          const rereadRollback = await firestoreListCollectionDocuments(collName);
+          const expectedOrigCount = preRestoreSnapshot[collName]?.length || 0;
+          if (rereadRollback.length !== expectedOrigCount) {
+            throw new Error(`Rollback verification count mismatch for "${collName}": expected ${expectedOrigCount}, got ${rereadRollback.length}`);
+          }
+        }
+
+        console.log(`[AUDIT-012] Automated compensating rollback succeeded. Database restored to pre-restore state.`);
+        clearRestoreLock();
+
+        const rollbackErr: any = new Error(`Restore failed (${error.message}). Automated rollback executed successfully: database restored to prior state.`);
+        rollbackErr.status = error.status || 500;
+        rollbackErr.code = 'RESTORE_FAILED_ROLLBACK_SUCCESS';
+        rollbackErr.originalError = error.message;
+        throw rollbackErr;
+      } catch (rollbackFatalErr: any) {
+        if (rollbackFatalErr.code === 'RESTORE_FAILED_ROLLBACK_SUCCESS') {
+          throw rollbackFatalErr;
+        }
+        setRestoreLock({
+          state: 'FAILED',
+          opId,
+          startedAt: Date.now(),
+          initiatedBy: options?.initiatedBy || 'admin',
+          lastError: `Fatal: Restore failed (${error.message}) AND rollback failed (${rollbackFatalErr.message})`,
+        });
+        const fatal: any = new Error(`FATAL: Restore failed (${error.message}) and automated rollback encountered an error: ${rollbackFatalErr.message}.`);
+        fatal.status = 500;
+        fatal.code = 'FATAL_RESTORE_AND_ROLLBACK_FAILED';
+        throw fatal;
+      }
+    } else {
+      // Pre-restore snapshot was not taken (failed during validation)
+      clearRestoreLock();
+      throw error;
+    }
+  }
+}
+
+export async function buildBackupV1Export(): Promise<NormalizedBackup> {
+  const snapshot = await capturePreRestoreSnapshot();
+  const counts: Record<string, number> = {};
+
+  const collectionsData: any = {};
+  for (const coll of MANAGED_ENTITY_COLLECTIONS) {
+    collectionsData[coll] = snapshot[coll] || [];
+    counts[coll] = collectionsData[coll].length;
+  }
+  for (const singleColl of MANAGED_SINGLETON_COLLECTIONS) {
+    collectionsData[singleColl] = snapshot[singleColl] || [];
+    counts[singleColl] = collectionsData[singleColl].length;
+  }
+
+  const checksum = computeBackupChecksum(collectionsData);
+
+  return {
+    metadata: {
+      formatVersion: 1,
+      createdAt: new Date().toISOString(),
+      app: 'Taiba Center Manager',
+      counts,
+      checksum,
+    },
+    collections: collectionsData,
+  };
+}
+
+export function requireNoActiveRestore(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const lock = getRestoreLock();
+  if (lock && lock.state !== 'IDLE') {
+    return res.status(503).json({
+      error: 'Maintenance mode: database restore in progress. Please retry after restore completes.',
+      code: 'RESTORE_IN_PROGRESS',
+      lock: { state: lock.state, opId: lock.opId, startedAt: lock.startedAt }
+    });
+  }
+  next();
 }
 
 // ---- Sales transactional business function (Shared Production Logic) ----
@@ -1331,7 +1885,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/clockout", requireFirebaseAuth, async (req, res) => {
+  app.post("/api/clockout", requireFirebaseAuth, requireNoActiveRestore, async (req, res) => {
     try {
       const attendanceId = req.body?.attendanceId || req.body?.id;
       const { checkOutTime, durationMinutes } = req.body;
@@ -1367,7 +1921,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/clockin", requireFirebaseAuth, async (req, res) => {
+  app.post("/api/clockin", requireFirebaseAuth, requireNoActiveRestore, async (req, res) => {
     try {
       const { employeeId, employeeName, date, checkInTime } = req.body;
       const targetId = employeeId || req.uid;
@@ -1457,7 +2011,7 @@ ${JSON.stringify(summary, null, 2)}
 
   // ---- Generic Firestore proxy endpoints ----
 
-  app.post("/api/proxy/set", requireFirebaseAuth, async (req, res) => {
+  app.post("/api/proxy/set", requireFirebaseAuth, requireNoActiveRestore, async (req, res) => {
     try {
       const { collection, id, data } = req.body;
       if (!collection || !id || !data) return res.status(400).json({ error: "Missing collection, id, or data" });
@@ -1477,7 +2031,7 @@ ${JSON.stringify(summary, null, 2)}
     }
   });
 
-  app.post("/api/proxy/delete", requireFirebaseAuth, async (req, res) => {
+  app.post("/api/proxy/delete", requireFirebaseAuth, requireNoActiveRestore, async (req, res) => {
     try {
       const { collection, id } = req.body;
       if (!collection || !id) return res.status(400).json({ error: "Missing collection or id" });
@@ -1515,7 +2069,7 @@ ${JSON.stringify(summary, null, 2)}
     }
   });
 
-  app.post("/api/proxy/batch", requireFirebaseAuth, async (req, res) => {
+  app.post("/api/proxy/batch", requireFirebaseAuth, requireNoActiveRestore, async (req, res) => {
     try {
       const { writes } = req.body;
       if (!Array.isArray(writes) || writes.length === 0) return res.status(400).json({ error: "Missing or empty writes array" });
@@ -1564,7 +2118,7 @@ ${JSON.stringify(summary, null, 2)}
 
   // ---- Sales transactional endpoints (AUDIT-005, AUDIT-013, AUDIT-014 Enforced) ----
 
-  app.post("/api/sales/create", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+  app.post("/api/sales/create", requireFirebaseAuth, requirePermission('pos'), requireNoActiveRestore, async (req, res) => {
     try {
       const { sale } = req.body;
       const valError = validateSalePayload(sale);
@@ -1583,7 +2137,7 @@ ${JSON.stringify(summary, null, 2)}
     }
   });
 
-  app.post("/api/sales/update", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+  app.post("/api/sales/update", requireFirebaseAuth, requirePermission('pos'), requireNoActiveRestore, async (req, res) => {
     try {
       const { sale } = req.body;
       const valError = validateSalePayload(sale);
@@ -1722,7 +2276,7 @@ ${JSON.stringify(summary, null, 2)}
     }
   });
 
-  app.post("/api/sales/delete", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+  app.post("/api/sales/delete", requireFirebaseAuth, requirePermission('pos'), requireNoActiveRestore, async (req, res) => {
     try {
       const { id } = req.body;
       if (!id || !isValidDocumentId(id)) return res.status(400).json({ error: "Missing or invalid sale ID" });
@@ -1784,7 +2338,7 @@ ${JSON.stringify(summary, null, 2)}
     }
   });
 
-  app.post("/api/sales/reschedule-debt", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+  app.post("/api/sales/reschedule-debt", requireFirebaseAuth, requirePermission('pos'), requireNoActiveRestore, async (req, res) => {
     try {
       const { saleId, newDate } = req.body;
       if (!saleId || !isValidDocumentId(saleId)) return res.status(400).json({ error: "Missing or invalid sale ID" });
@@ -1802,7 +2356,7 @@ ${JSON.stringify(summary, null, 2)}
     }
   });
 
-  app.post("/api/sales/settle-debt", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+  app.post("/api/sales/settle-debt", requireFirebaseAuth, requirePermission('pos'), requireNoActiveRestore, async (req, res) => {
     try {
       const { saleId } = req.body;
       if (!saleId || !isValidDocumentId(saleId)) return res.status(400).json({ error: "Missing or invalid sale ID" });
@@ -1845,7 +2399,7 @@ ${JSON.stringify(summary, null, 2)}
     }
   });
 
-  app.post("/api/sales/return", requireFirebaseAuth, requirePermission('pos'), async (req, res) => {
+  app.post("/api/sales/return", requireFirebaseAuth, requirePermission('pos'), requireNoActiveRestore, async (req, res) => {
     try {
       const { originalSale, user } = req.body;
       if (!originalSale || typeof originalSale !== 'object') return res.status(400).json({ error: "Missing original sale data" });
@@ -1921,92 +2475,72 @@ ${JSON.stringify(summary, null, 2)}
     }
   });
 
-  // ---- Backup operation endpoints (admin only) ----
+  // ---- Backup operation endpoints (admin only, AUDIT-012 Protected) ----
 
-  app.post("/api/backup/restore", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
+  app.get("/api/backup/export", adminLimiter, requireFirebaseAuth, requireAdmin, requireNoActiveRestore, async (req, res) => {
     try {
-      const { data } = req.body;
-      if (!data || typeof data !== 'object') return res.status(400).json({ error: "Missing backup data" });
+      await auditLog('backup_export_started', req.uid || '', req.employee?.email || '', {});
+      const backupData = await buildBackupV1Export();
 
-      await auditLog('backup_restore_started', req.uid || '', req.employee?.email || '', {});
+      const todayStr = new Date().toISOString().split('T')[0];
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="taiba_backup_${todayStr}.json"`);
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
 
-      const collectionsToClear = ['products', 'sales', 'expenses', 'employees', 'customers', 'suppliers', 'attendance', 'categories', 'seasons', 'metadata'];
-      for (const coll of collectionsToClear) {
-        const token = await getGoogleAccessToken();
-        const baseUrl = getFirestoreBaseUrl();
-        const listResp = await fetch(
-          `${baseUrl}/documents/${coll}`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-        if (listResp.ok) {
-          const listData = await listResp.json() as any;
-          const docs = listData.documents || [];
-          if (docs.length > 0) {
-            const deleteWrites = docs.map((d: any) => ({
-              type: 'delete' as const, collection: coll, id: d.name.split('/').pop()
-            }));
-            await firestoreCommit(deleteWrites);
-          }
-        }
-      }
+      await auditLog('backup_export_completed', req.uid || '', req.employee?.email || '', {
+        counts: backupData.metadata.counts,
+        checksum: backupData.metadata.checksum,
+      });
 
-      const writeArrayData = async (items: any[], collectionName: string) => {
-        if (!Array.isArray(items)) return;
-        const writes: { type: 'set'; collection: string; id: string; data: any }[] = [];
-        for (const item of items) {
-          if (item && item.id && isValidDocumentId(item.id)) {
-            writes.push({ type: 'set', collection: collectionName, id: item.id, data: item });
-          }
-        }
-        for (let i = 0; i < writes.length; i += 450) {
-          await firestoreCommit(writes.slice(i, i + 450));
-        }
-      };
-
-      await writeArrayData(data.products, 'products');
-      await writeArrayData(data.sales, 'sales');
-      await writeArrayData(data.expenses, 'expenses');
-      await writeArrayData(data.employees, 'employees');
-      await writeArrayData(data.customers, 'customers');
-      await writeArrayData(data.attendance, 'attendance');
-      await writeArrayData(data.suppliers, 'suppliers');
-
-      if (Array.isArray(data.categories)) {
-        await firestoreSetDocument('categories', 'all', { items: data.categories });
-      }
-      if (Array.isArray(data.seasons)) {
-        await firestoreSetDocument('seasons', 'all', { items: data.seasons });
-      }
-
-      await auditLog('backup_restore_completed', req.uid || '', req.employee?.email || '', {});
-      res.json({ ok: true });
+      res.json(backupData);
     } catch (e: any) {
-      await auditLog('backup_restore_failed', req.uid || '', req.employee?.email || '', { error: e.message });
+      await auditLog('backup_export_failed', req.uid || '', req.employee?.email || '', { error: e.message });
       res.status(500).json({ error: e.message });
     }
   });
 
-  app.post("/api/backup/clear", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
+  app.post("/api/backup/restore", adminLimiter, requireFirebaseAuth, requireAdmin, async (req, res) => {
+    try {
+      const payload = req.body?.data || req.body;
+      if (!payload || typeof payload !== 'object') {
+        return res.status(400).json({ error: "Missing backup data payload" });
+      }
+
+      await auditLog('backup_restore_started', req.uid || '', req.employee?.email || '', {});
+
+      const result = await executeFailureSafeRestore(payload, {
+        initiatedBy: req.employee?.email || req.uid,
+      });
+
+      await auditLog('backup_restore_completed', req.uid || '', req.employee?.email || '', { stats: result.stats });
+      res.json(result);
+    } catch (e: any) {
+      const status = e.status || 500;
+      await auditLog('backup_restore_failed', req.uid || '', req.employee?.email || '', {
+        error: e.message,
+        code: e.code,
+      });
+      res.status(status).json({
+        error: e.message,
+        code: e.code || 'RESTORE_ERROR',
+        details: e.originalError || undefined,
+      });
+    }
+  });
+
+  app.post("/api/backup/clear", adminLimiter, requireFirebaseAuth, requireAdmin, requireNoActiveRestore, async (req, res) => {
     try {
       await auditLog('data_clear_requested', req.uid || '', req.employee?.email || '', {});
 
-      const collectionsToClear = ['products', 'sales', 'expenses', 'employees', 'customers', 'suppliers', 'attendance', 'categories', 'seasons', 'metadata'];
-      for (const coll of collectionsToClear) {
-        const token = await getGoogleAccessToken();
-        const baseUrl = getFirestoreBaseUrl();
-        const listResp = await fetch(
-          `${baseUrl}/documents/${coll}`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-        if (listResp.ok) {
-          const listData = await listResp.json() as any;
-          const docs = listData.documents || [];
-          if (docs.length > 0) {
-            const deleteWrites = docs.map((d: any) => ({
-              type: 'delete' as const, collection: coll, id: d.name.split('/').pop()
-            }));
-            await firestoreCommit(deleteWrites);
-          }
+      for (const coll of ALL_MANAGED_COLLECTIONS) {
+        const docs = await firestoreListCollectionDocuments(coll);
+        if (docs.length > 0) {
+          const deleteWrites = docs.map((d: any) => ({
+            type: 'delete' as const, collection: coll, id: d.id
+          }));
+          await firestoreCommit(deleteWrites);
         }
       }
 
