@@ -376,6 +376,11 @@ describe('AUDIT-016: HttpOnly Session Cookie Storage & Lifecycle Verification', 
 import {
   validateBackupPayload,
   computeBackupChecksum,
+  computeCanonicalStateHash,
+  compareCanonicalStates,
+  getRestoreLock,
+  setRestoreLock,
+  clearRestoreLock,
 } from './server';
 
 describe('AUDIT-012: Backup Validation & Integrity Unit Tests', () => {
@@ -454,5 +459,84 @@ describe('AUDIT-012: Backup Validation & Integrity Unit Tests', () => {
     expect(result.normalized?.metadata.formatVersion).toBe(1);
     expect(result.normalized?.collections.products.length).toBe(1);
     expect(result.normalized?.collections.categories).toEqual(['بناتي', 'ولادي']);
+  });
+
+  it('AUTH-012-UNIT-08: Full-State Equality: Identical document counts with different field values are detected as unequal', () => {
+    // State A: 2 products
+    const stateA = {
+      products: [
+        { id: 'p1', name: 'قميص أزرق', sellingPrice: 50, stock: 10 },
+        { id: 'p2', name: 'بنطلون رمادي', sellingPrice: 80, stock: 5 },
+      ]
+    };
+    // State B: 2 products (same count and IDs, but p1 sellingPrice is 60 instead of 50)
+    const stateB = {
+      products: [
+        { id: 'p1', name: 'قميص أزرق', sellingPrice: 60, stock: 10 },
+        { id: 'p2', name: 'بنطلون رمادي', sellingPrice: 80, stock: 5 },
+      ]
+    };
+
+    expect(stateA.products.length).toBe(stateB.products.length); // Same counts (2 == 2)
+    const comparison = compareCanonicalStates(stateA, stateB);
+
+    expect(comparison.equal).toBe(false);
+    expect(comparison.hashA).not.toBe(comparison.hashB);
+    expect(comparison.mismatches).toContain('products');
+  });
+
+  it('AUTH-012-UNIT-09: Canonical State Hash: Independent of object key order or array document sequence', () => {
+    const state1 = {
+      products: [
+        { id: 'p2', stock: 5, sellingPrice: 80, name: 'بنطلون' },
+        { id: 'p1', name: 'قميص', sellingPrice: 50, stock: 10 },
+      ],
+      categories: ['أطفال', 'رضع'],
+    };
+
+    const state2 = {
+      categories: ['أطفال', 'رضع'],
+      products: [
+        { name: 'قميص', id: 'p1', stock: 10, sellingPrice: 50 },
+        { id: 'p2', name: 'بنطلون', stock: 5, sellingPrice: 80 },
+      ],
+    };
+
+    const hash1 = computeCanonicalStateHash(state1);
+    const hash2 = computeCanonicalStateHash(state2);
+
+    expect(hash1).toBe(hash2);
+    expect(compareCanonicalStates(state1, state2).equal).toBe(true);
+  });
+
+  it('AUTH-012-UNIT-10: Restore Lock Lease: Active restore with continuous heartbeat remains active beyond 5 minutes', () => {
+    const now = Date.now();
+    // Simulate an operation started 10 minutes ago, but heartbeat updated 30 seconds ago
+    setRestoreLock({
+      opId: 'res-long-running',
+      state: 'RESTORING',
+      startedAt: now - (10 * 60 * 1000), // 10 minutes ago
+      heartbeatAt: now - (30 * 1000),     // Heartbeat 30 seconds ago
+      initiatedBy: 'admin',
+    });
+
+    const lock = getRestoreLock();
+    expect(lock).not.toBeNull();
+    expect(lock?.opId).toBe('res-long-running');
+    expect(lock?.state).toBe('RESTORING');
+
+    // Simulate an operation where heartbeat died 6 minutes ago (stale process crash)
+    setRestoreLock({
+      opId: 'res-stale-dead',
+      state: 'RESTORING',
+      startedAt: now - (10 * 60 * 1000),
+      heartbeatAt: now - (6 * 60 * 1000), // Heartbeat > 5 mins ago
+      initiatedBy: 'admin',
+    });
+
+    const staleLock = getRestoreLock();
+    expect(staleLock).toBeNull(); // Cleanly expired due to missing heartbeat
+
+    clearRestoreLock();
   });
 });

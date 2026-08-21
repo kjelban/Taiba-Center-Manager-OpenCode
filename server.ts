@@ -728,7 +728,7 @@ export async function firestoreListCollectionDocuments(collectionName: string): 
   return docs;
 }
 
-// ── AUDIT-012: Backup Format, Validation, Lock State Machine & Compensating Rollback ──
+// ── AUDIT-012: Durable Backup Format, Validation, Lock State Machine & Compensating Rollback ──
 
 export const MANAGED_ENTITY_COLLECTIONS = [
   'products',
@@ -750,28 +750,62 @@ export const ALL_MANAGED_COLLECTIONS = [
   ...MANAGED_SINGLETON_COLLECTIONS
 ] as const;
 
-export type RestoreLockState = 'IDLE' | 'PREPARING' | 'RESTORING' | 'VERIFYING' | 'ROLLING_BACK' | 'FAILED';
+export const SYSTEM_RECOVERY_OPERATIONS_COLLECTION = '_system_restore_operations';
+export const SYSTEM_RECOVERY_SNAPSHOTS_COLLECTION = '_system_restore_snapshots';
 
-export interface RestoreLockInfo {
-  state: RestoreLockState;
+export type RestoreLockState =
+  | 'IDLE'
+  | 'PREPARING'
+  | 'SNAPSHOT_READY'
+  | 'RESTORING'
+  | 'VERIFYING'
+  | 'ROLLING_BACK'
+  | 'ROLLED_BACK'
+  | 'COMPLETED'
+  | 'ABORTED'
+  | 'FAILED'
+  | 'RECOVERY_REQUIRED'
+  | 'RECOVERY_FAILED_MANUAL_INTERVENTION_REQUIRED';
+
+export interface DurableRestoreOperation {
   opId: string;
+  state: RestoreLockState;
   startedAt: number;
-  initiatedBy?: string;
+  heartbeatAt: number;
+  initiatedBy: string;
+  backupChecksum?: string;
+  snapshotStateHash?: string;
+  snapshotCounts?: Record<string, number>;
   lastError?: string;
+  recoveryStatus?: string;
 }
 
-let activeRestoreLock: RestoreLockInfo | null = null;
+export const STALE_LOCK_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes of no heartbeat
+
+let activeRestoreLock: DurableRestoreOperation | null = null;
 let testFaultInjectionAfterWrites: number | null = null;
 
-export function getRestoreLock(): RestoreLockInfo | null {
-  if (activeRestoreLock && (Date.now() - activeRestoreLock.startedAt > 5 * 60 * 1000)) {
-    // Auto-expire stale lock after 5 minutes
-    activeRestoreLock = null;
+export function getRestoreLock(): DurableRestoreOperation | null {
+  if (activeRestoreLock) {
+    const isTerminalState =
+      activeRestoreLock.state === 'IDLE' ||
+      activeRestoreLock.state === 'COMPLETED' ||
+      activeRestoreLock.state === 'ROLLED_BACK' ||
+      activeRestoreLock.state === 'ABORTED';
+
+    if (isTerminalState) {
+      return null;
+    }
+
+    // Only expire if heartbeat has elapsed past STALE_LOCK_THRESHOLD_MS
+    if (Date.now() - activeRestoreLock.heartbeatAt > STALE_LOCK_THRESHOLD_MS) {
+      activeRestoreLock = null;
+    }
   }
   return activeRestoreLock;
 }
 
-export function setRestoreLock(info: RestoreLockInfo | null): void {
+export function setRestoreLock(info: DurableRestoreOperation | null): void {
   activeRestoreLock = info;
 }
 
@@ -783,14 +817,177 @@ export function setTestRestoreFaultInjection(writesThreshold: number | null): vo
   testFaultInjectionAfterWrites = writesThreshold;
 }
 
-export function computeBackupChecksum(collectionsData: Record<string, any>): string {
-  // Canonical key ordering for deterministic checksum calculation
-  const sortedKeys = Object.keys(collectionsData).sort();
-  const canonicalObj: Record<string, any> = {};
-  for (const k of sortedKeys) {
-    canonicalObj[k] = collectionsData[k];
+// ── Canonical Serialization & Full State Equality Hashing ──
+
+export function canonicalizeValue(val: any): any {
+  if (val === null || val === undefined || typeof val !== 'object') {
+    return val;
   }
-  return crypto.createHash('sha256').update(JSON.stringify(canonicalObj)).digest('hex');
+  if (Array.isArray(val)) {
+    return val.map(canonicalizeValue);
+  }
+  const sortedKeys = Object.keys(val).sort();
+  const result: Record<string, any> = {};
+  for (const k of sortedKeys) {
+    result[k] = canonicalizeValue(val[k]);
+  }
+  return result;
+}
+
+export function computeCanonicalStateHash(state: Record<string, any>): string {
+  const sortedColls = Object.keys(state).sort();
+  const normalizedState: Record<string, any> = {};
+
+  for (const coll of sortedColls) {
+    const raw = state[coll];
+    if (Array.isArray(raw)) {
+      // Sort items deterministically by ID or serialized representation
+      const sortedItems = [...raw].map(canonicalizeValue).sort((a, b) => {
+        const idA = (a && typeof a === 'object' && a.id) ? String(a.id) : JSON.stringify(a);
+        const idB = (b && typeof b === 'object' && b.id) ? String(b.id) : JSON.stringify(b);
+        return idA.localeCompare(idB);
+      });
+      normalizedState[coll] = sortedItems;
+    } else {
+      normalizedState[coll] = canonicalizeValue(raw);
+    }
+  }
+
+  const canonicalJson = JSON.stringify(normalizedState);
+  return crypto.createHash('sha256').update(canonicalJson).digest('hex');
+}
+
+export function compareCanonicalStates(
+  stateA: Record<string, any>,
+  stateB: Record<string, any>
+): { equal: boolean; hashA: string; hashB: string; mismatches: string[] } {
+  const hashA = computeCanonicalStateHash(stateA);
+  const hashB = computeCanonicalStateHash(stateB);
+  const mismatches: string[] = [];
+
+  const allColls = new Set([...Object.keys(stateA), ...Object.keys(stateB)]);
+  for (const c of allColls) {
+    const subHashA = computeCanonicalStateHash({ [c]: stateA[c] || [] });
+    const subHashB = computeCanonicalStateHash({ [c]: stateB[c] || [] });
+    if (subHashA !== subHashB) {
+      mismatches.push(c);
+    }
+  }
+
+  return { equal: hashA === hashB, hashA, hashB, mismatches };
+}
+
+export function computeBackupChecksum(collectionsData: Record<string, any>): string {
+  return computeCanonicalStateHash(collectionsData);
+}
+
+// ── Durable Recovery Journal in Firestore ──
+
+export async function getDurableRestoreOperation(): Promise<DurableRestoreOperation | null> {
+  try {
+    const doc = await firestoreGetDocument(`${SYSTEM_RECOVERY_OPERATIONS_COLLECTION}/current`);
+    if (!doc || !doc.opId) return null;
+    return doc as DurableRestoreOperation;
+  } catch (e: any) {
+    return null;
+  }
+}
+
+export async function setDurableRestoreOperation(op: DurableRestoreOperation): Promise<void> {
+  setRestoreLock(op);
+  try {
+    await firestoreSetDocument(SYSTEM_RECOVERY_OPERATIONS_COLLECTION, 'current', op);
+    // Also log historical trace doc for permanent audit trail
+    await firestoreSetDocument(SYSTEM_RECOVERY_OPERATIONS_COLLECTION, op.opId, op);
+  } catch (e: any) {
+    console.error('[AUDIT-012] Failed to write durable restore operation:', e.message);
+  }
+}
+
+export async function persistDurablePreRestoreSnapshot(
+  opId: string,
+  snapshot: Record<string, any>
+): Promise<{ stateHash: string; counts: Record<string, number> }> {
+  const counts: Record<string, number> = {};
+  const stateHash = computeCanonicalStateHash(snapshot);
+
+  const CHUNK_SIZE = 100;
+  const writes: { type: 'set'; collection: string; id: string; data: any }[] = [];
+
+  for (const collName of MANAGED_ENTITY_COLLECTIONS) {
+    const items = snapshot[collName] || [];
+    counts[collName] = items.length;
+    const totalChunks = Math.max(1, Math.ceil(items.length / CHUNK_SIZE));
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkItems = items.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+      const chunkId = `${opId}_${collName}_chunk_${i}`;
+      writes.push({
+        type: 'set',
+        collection: SYSTEM_RECOVERY_SNAPSHOTS_COLLECTION,
+        id: chunkId,
+        data: {
+          opId,
+          collectionName: collName,
+          chunkIndex: i,
+          totalChunks,
+          items: chunkItems,
+          createdAt: new Date().toISOString(),
+        },
+      });
+    }
+  }
+
+  for (const singleColl of MANAGED_SINGLETON_COLLECTIONS) {
+    const items = snapshot[singleColl] || [];
+    counts[singleColl] = items.length;
+    writes.push({
+      type: 'set',
+      collection: SYSTEM_RECOVERY_SNAPSHOTS_COLLECTION,
+      id: `${opId}_${singleColl}_all`,
+      data: {
+        opId,
+        collectionName: singleColl,
+        items,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  await firestoreCommit(writes);
+  return { stateHash, counts };
+}
+
+export async function loadDurablePreRestoreSnapshot(opId: string): Promise<Record<string, any> | null> {
+  try {
+    const allSnapshotDocs = await firestoreListCollectionDocuments(SYSTEM_RECOVERY_SNAPSHOTS_COLLECTION);
+    const opDocs = allSnapshotDocs.filter((d: any) => d.opId === opId);
+    if (opDocs.length === 0) return null;
+
+    const reconstructed: Record<string, any> = {};
+
+    for (const collName of MANAGED_ENTITY_COLLECTIONS) {
+      const collChunks = opDocs
+        .filter((d: any) => d.collectionName === collName)
+        .sort((a: any, b: any) => (a.chunkIndex || 0) - (b.chunkIndex || 0));
+      const mergedItems: any[] = [];
+      for (const chunk of collChunks) {
+        if (Array.isArray(chunk.items)) {
+          mergedItems.push(...chunk.items);
+        }
+      }
+      reconstructed[collName] = mergedItems;
+    }
+
+    for (const singleColl of MANAGED_SINGLETON_COLLECTIONS) {
+      const doc = opDocs.find((d: any) => d.collectionName === singleColl);
+      reconstructed[singleColl] = (doc && Array.isArray(doc.items)) ? doc.items : [];
+    }
+
+    return reconstructed;
+  } catch (e: any) {
+    console.error('[AUDIT-012] Failed to load durable pre-restore snapshot:', e.message);
+    return null;
+  }
 }
 
 export interface NormalizedBackup {
@@ -990,13 +1187,48 @@ export async function capturePreRestoreSnapshot(): Promise<Record<string, any>> 
   return snapshot;
 }
 
+export async function executeCompensatingRollback(
+  snapshot: Record<string, any>,
+  opId: string,
+  reason: string
+): Promise<void> {
+  console.warn(`[AUDIT-012] Executing compensating rollback for opId=${opId} (Reason: ${reason})...`);
+
+  for (const collName of MANAGED_ENTITY_COLLECTIONS) {
+    const currentDocsInDb = await firestoreListCollectionDocuments(collName);
+    const originalDocs = snapshot[collName] || [];
+    const originalIdSet = new Set(originalDocs.map((x: any) => x.id));
+
+    const rollbackWrites: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[] = [];
+
+    // Delete docs written during restore that were not originally present
+    for (const cur of currentDocsInDb) {
+      if (!originalIdSet.has(cur.id)) {
+        rollbackWrites.push({ type: 'delete', collection: collName, id: cur.id });
+      }
+    }
+
+    // Re-write all original snapshot documents
+    for (const orig of originalDocs) {
+      rollbackWrites.push({ type: 'set', collection: collName, id: orig.id, data: orig });
+    }
+
+    await firestoreCommit(rollbackWrites);
+  }
+
+  for (const singleColl of MANAGED_SINGLETON_COLLECTIONS) {
+    const origItems = snapshot[singleColl] || [];
+    await firestoreSetDocument(singleColl, 'all', { items: origItems });
+  }
+}
+
 export async function executeFailureSafeRestore(
   rawBackupPayload: any,
   options?: { initiatedBy?: string; faultInjectionAfterWritesCount?: number }
 ): Promise<{ ok: boolean; stats: { restoredCounts: Record<string, number>; deletedCounts: Record<string, number> } }> {
-  // 1. MUTUAL EXCLUSION & LOCK CHECK
+  // 1. MUTUAL EXCLUSION & DURABLE LOCK CHECK
   const currentLock = getRestoreLock();
-  if (currentLock && currentLock.state !== 'IDLE') {
+  if (currentLock) {
     const err: any = new Error('A database restore operation is already in progress');
     err.status = 409;
     err.code = 'RESTORE_ALREADY_IN_PROGRESS';
@@ -1005,12 +1237,16 @@ export async function executeFailureSafeRestore(
   }
 
   const opId = 'res_' + crypto.randomUUID();
-  setRestoreLock({
-    state: 'PREPARING',
+  const initiatedBy = options?.initiatedBy || 'admin';
+
+  let currentOp: DurableRestoreOperation = {
     opId,
+    state: 'PREPARING',
     startedAt: Date.now(),
-    initiatedBy: options?.initiatedBy || 'admin',
-  });
+    heartbeatAt: Date.now(),
+    initiatedBy,
+  };
+  await setDurableRestoreOperation(currentOp);
 
   let preRestoreSnapshot: Record<string, any> | null = null;
 
@@ -1025,17 +1261,28 @@ export async function executeFailureSafeRestore(
     }
 
     const normalized = validation.normalized;
+    currentOp.backupChecksum = computeBackupChecksum(normalized.collections);
 
-    // 3. PRE-RESTORE DURABLE SNAPSHOT CAPTURE
+    // 3. CAPTURE & PERSIST DURABLE PRE-RESTORE SNAPSHOT BEFORE ANY MUTATION
     preRestoreSnapshot = await capturePreRestoreSnapshot();
+    const persistedSnapshotMeta = await persistDurablePreRestoreSnapshot(opId, preRestoreSnapshot);
+
+    currentOp = {
+      ...currentOp,
+      state: 'SNAPSHOT_READY',
+      heartbeatAt: Date.now(),
+      snapshotStateHash: persistedSnapshotMeta.stateHash,
+      snapshotCounts: persistedSnapshotMeta.counts,
+    };
+    await setDurableRestoreOperation(currentOp);
 
     // 4. RESTORATION MUTATION PHASE (Exact Replacement Semantics)
-    setRestoreLock({
+    currentOp = {
+      ...currentOp,
       state: 'RESTORING',
-      opId,
-      startedAt: Date.now(),
-      initiatedBy: options?.initiatedBy || 'admin',
-    });
+      heartbeatAt: Date.now(),
+    };
+    await setDurableRestoreOperation(currentOp);
 
     let totalWritesExecuted = 0;
     const deletedCounts: Record<string, number> = {};
@@ -1078,6 +1325,10 @@ export async function executeFailureSafeRestore(
 
       await firestoreCommit(writes);
       totalWritesExecuted += writes.length;
+
+      // Keep heartbeat active during long multi-collection operations
+      currentOp.heartbeatAt = Date.now();
+      await setDurableRestoreOperation(currentOp);
     }
 
     // Apply singleton collections
@@ -1087,111 +1338,217 @@ export async function executeFailureSafeRestore(
       restoredCounts[singleColl] = itemsList.length;
     }
 
-    // 5. POST-RESTORE VERIFICATION PHASE
-    setRestoreLock({
+    // 5. POST-RESTORE VERIFICATION PHASE (Canonical Full-State Verification)
+    currentOp = {
+      ...currentOp,
       state: 'VERIFYING',
-      opId,
-      startedAt: Date.now(),
-      initiatedBy: options?.initiatedBy || 'admin',
-    });
+      heartbeatAt: Date.now(),
+    };
+    await setDurableRestoreOperation(currentOp);
 
-    for (const collName of MANAGED_ENTITY_COLLECTIONS) {
-      const rereadDocs = await firestoreListCollectionDocuments(collName);
-      const expectedCount = normalized.collections[collName].length;
-      if (rereadDocs.length !== expectedCount) {
-        throw new Error(`Post-restore verification mismatch on "${collName}": expected ${expectedCount} docs, found ${rereadDocs.length}`);
-      }
-      const expectedIds = new Set(normalized.collections[collName].map((x: any) => x.id));
-      for (const d of rereadDocs) {
-        if (!expectedIds.has(d.id)) {
-          throw new Error(`Post-restore verification failed: unexpected extra document "${d.id}" in "${collName}"`);
-        }
-      }
+    const postRestoreDbState = await capturePreRestoreSnapshot();
+    const stateComparison = compareCanonicalStates(postRestoreDbState, normalized.collections);
+
+    if (!stateComparison.equal) {
+      throw new Error(`Post-restore verification mismatch on collections: ${stateComparison.mismatches.join(', ')}`);
     }
 
-    // 6. SUCCESS & LOCK RELEASE
+    // 6. SUCCESS & MARK OPERATION COMPLETED
+    currentOp = {
+      ...currentOp,
+      state: 'COMPLETED',
+      heartbeatAt: Date.now(),
+    };
+    await setDurableRestoreOperation(currentOp);
     clearRestoreLock();
+
     return { ok: true, stats: { restoredCounts, deletedCounts } };
   } catch (error: any) {
-    // 7. COMPENSATING ROLLBACK PHASE (Failure Recovery)
+    // 7. COMPENSATING ROLLBACK PHASE (Automated Rollback & Full-State Equality Proof)
     if (preRestoreSnapshot) {
-      setRestoreLock({
+      currentOp = {
+        ...currentOp,
         state: 'ROLLING_BACK',
-        opId,
-        startedAt: Date.now(),
-        initiatedBy: options?.initiatedBy || 'admin',
+        heartbeatAt: Date.now(),
         lastError: error.message,
-      });
+      };
+      await setDurableRestoreOperation(currentOp);
 
       try {
-        console.warn(`[AUDIT-012] Restore aborted (${error.message}). Executing automated compensating rollback...`);
+        await executeCompensatingRollback(preRestoreSnapshot, opId, error.message);
 
-        for (const collName of MANAGED_ENTITY_COLLECTIONS) {
-          const currentDocsInDb = await firestoreListCollectionDocuments(collName);
-          const originalDocs = preRestoreSnapshot[collName] || [];
-          const originalIdSet = new Set(originalDocs.map((x: any) => x.id));
+        // Verification of Rollback State Equality against Pre-Restore Snapshot
+        const rolledBackState = await capturePreRestoreSnapshot();
+        const rollbackComparison = compareCanonicalStates(rolledBackState, preRestoreSnapshot);
 
-          const rollbackWrites: { type: 'set' | 'update' | 'delete'; collection: string; id: string; data?: any }[] = [];
-
-          // Delete docs that were written during partial restore but were not originally present
-          for (const cur of currentDocsInDb) {
-            if (!originalIdSet.has(cur.id)) {
-              rollbackWrites.push({ type: 'delete', collection: collName, id: cur.id });
-            }
-          }
-
-          // Re-write all original snapshot documents
-          for (const orig of originalDocs) {
-            rollbackWrites.push({ type: 'set', collection: collName, id: orig.id, data: orig });
-          }
-
-          await firestoreCommit(rollbackWrites);
+        if (!rollbackComparison.equal) {
+          throw new Error(
+            `Rollback verification state mismatch on collections: ${rollbackComparison.mismatches.join(', ')}`
+          );
         }
 
-        for (const singleColl of MANAGED_SINGLETON_COLLECTIONS) {
-          const origItems = preRestoreSnapshot[singleColl] || [];
-          await firestoreSetDocument(singleColl, 'all', { items: origItems });
-        }
+        console.log(`[AUDIT-012] Automated compensating rollback succeeded. Full canonical state matches pre-restore snapshot.`);
 
-        // Verify Rollback Reread
-        for (const collName of MANAGED_ENTITY_COLLECTIONS) {
-          const rereadRollback = await firestoreListCollectionDocuments(collName);
-          const expectedOrigCount = preRestoreSnapshot[collName]?.length || 0;
-          if (rereadRollback.length !== expectedOrigCount) {
-            throw new Error(`Rollback verification count mismatch for "${collName}": expected ${expectedOrigCount}, got ${rereadRollback.length}`);
-          }
-        }
-
-        console.log(`[AUDIT-012] Automated compensating rollback succeeded. Database restored to pre-restore state.`);
+        currentOp = {
+          ...currentOp,
+          state: 'ROLLED_BACK',
+          heartbeatAt: Date.now(),
+          recoveryStatus: 'Compensating rollback succeeded; full canonical state restored',
+        };
+        await setDurableRestoreOperation(currentOp);
         clearRestoreLock();
 
-        const rollbackErr: any = new Error(`Restore failed (${error.message}). Automated rollback executed successfully: database restored to prior state.`);
+        const rollbackErr: any = new Error(
+          `Restore failed (${error.message}). Automated rollback executed successfully: database restored to exact prior state.`
+        );
         rollbackErr.status = error.status || 500;
         rollbackErr.code = 'RESTORE_FAILED_ROLLBACK_SUCCESS';
         rollbackErr.originalError = error.message;
+        rollbackErr.stateHash = rollbackComparison.hashA;
         throw rollbackErr;
       } catch (rollbackFatalErr: any) {
         if (rollbackFatalErr.code === 'RESTORE_FAILED_ROLLBACK_SUCCESS') {
           throw rollbackFatalErr;
         }
-        setRestoreLock({
-          state: 'FAILED',
-          opId,
-          startedAt: Date.now(),
-          initiatedBy: options?.initiatedBy || 'admin',
+        currentOp = {
+          ...currentOp,
+          state: 'RECOVERY_FAILED_MANUAL_INTERVENTION_REQUIRED',
+          heartbeatAt: Date.now(),
           lastError: `Fatal: Restore failed (${error.message}) AND rollback failed (${rollbackFatalErr.message})`,
-        });
-        const fatal: any = new Error(`FATAL: Restore failed (${error.message}) and automated rollback encountered an error: ${rollbackFatalErr.message}.`);
+        };
+        await setDurableRestoreOperation(currentOp);
+
+        const fatal: any = new Error(
+          `FATAL: Restore failed (${error.message}) and automated rollback encountered an error: ${rollbackFatalErr.message}.`
+        );
         fatal.status = 500;
         fatal.code = 'FATAL_RESTORE_AND_ROLLBACK_FAILED';
         throw fatal;
       }
     } else {
-      // Pre-restore snapshot was not taken (failed during validation)
+      // Pre-restore snapshot was not taken (failed during pre-flight validation)
+      currentOp = {
+        ...currentOp,
+        state: 'ABORTED',
+        heartbeatAt: Date.now(),
+        lastError: error.message,
+      };
+      await setDurableRestoreOperation(currentOp);
       clearRestoreLock();
       throw error;
     }
   }
+}
+
+export async function recoverPendingRestoreOperation(): Promise<{
+  recovered: boolean;
+  status: 'NO_OP' | 'ABORTED_PRE_MUTATION' | 'ROLLED_BACK_CRASH' | 'RECOVERY_FAILED_CORRUPT_SNAPSHOT';
+  opId?: string;
+  stateHash?: string;
+  error?: string;
+}> {
+  const currentOp = await getDurableRestoreOperation();
+  if (
+    !currentOp ||
+    currentOp.state === 'IDLE' ||
+    currentOp.state === 'COMPLETED' ||
+    currentOp.state === 'ROLLED_BACK' ||
+    currentOp.state === 'ABORTED'
+  ) {
+    return { recovered: false, status: 'NO_OP' };
+  }
+
+  console.warn(`[AUDIT-012] Found uncompleted restore operation on startup: opId=${currentOp.opId}, state=${currentOp.state}`);
+
+  if (currentOp.state === 'PREPARING') {
+    // Mutation has not started! Safely abort.
+    await setDurableRestoreOperation({
+      ...currentOp,
+      state: 'ABORTED',
+      recoveryStatus: 'Aborted safely during startup before any database mutation began',
+      heartbeatAt: Date.now(),
+    });
+    await auditLog('restore_startup_aborted', 'system', 'system', { opId: currentOp.opId });
+    clearRestoreLock();
+    return { recovered: true, status: 'ABORTED_PRE_MUTATION', opId: currentOp.opId };
+  }
+
+  if (
+    currentOp.state === 'SNAPSHOT_READY' ||
+    currentOp.state === 'RESTORING' ||
+    currentOp.state === 'VERIFYING' ||
+    currentOp.state === 'ROLLING_BACK'
+  ) {
+    // Process crash detected mid-mutation
+    console.warn(`[AUDIT-012] Crash detected mid-restore (opId=${currentOp.opId}). Executing durable startup rollback...`);
+    await setDurableRestoreOperation({
+      ...currentOp,
+      state: 'ROLLING_BACK',
+      recoveryStatus: 'Crash detected; recovering from durable pre-restore snapshot',
+      heartbeatAt: Date.now(),
+    });
+
+    const durableSnapshot = await loadDurablePreRestoreSnapshot(currentOp.opId);
+    if (!durableSnapshot) {
+      const errMsg = `Durable pre-restore snapshot missing for opId=${currentOp.opId}`;
+      console.error(`[AUDIT-012] FATAL: ${errMsg}`);
+      await setDurableRestoreOperation({
+        ...currentOp,
+        state: 'RECOVERY_FAILED_MANUAL_INTERVENTION_REQUIRED',
+        lastError: errMsg,
+        heartbeatAt: Date.now(),
+      });
+      await auditLog('restore_startup_recovery_failed', 'system', 'system', { opId: currentOp.opId, reason: 'MISSING_SNAPSHOT' });
+      return { recovered: false, status: 'RECOVERY_FAILED_CORRUPT_SNAPSHOT', opId: currentOp.opId, error: 'MISSING_SNAPSHOT' };
+    }
+
+    if (currentOp.snapshotStateHash) {
+      const loadedHash = computeCanonicalStateHash(durableSnapshot);
+      if (loadedHash !== currentOp.snapshotStateHash) {
+        const errMsg = `Durable snapshot hash mismatch (expected ${currentOp.snapshotStateHash}, got ${loadedHash})`;
+        console.error(`[AUDIT-012] FATAL: ${errMsg}`);
+        await setDurableRestoreOperation({
+          ...currentOp,
+          state: 'RECOVERY_FAILED_MANUAL_INTERVENTION_REQUIRED',
+          lastError: errMsg,
+          heartbeatAt: Date.now(),
+        });
+        await auditLog('restore_startup_recovery_failed', 'system', 'system', { opId: currentOp.opId, reason: 'CORRUPT_SNAPSHOT' });
+        return { recovered: false, status: 'RECOVERY_FAILED_CORRUPT_SNAPSHOT', opId: currentOp.opId, error: 'CORRUPT_SNAPSHOT' };
+      }
+    }
+
+    // Execute compensating rollback from durable snapshot
+    await executeCompensatingRollback(durableSnapshot, currentOp.opId, 'Startup Crash Recovery');
+
+    const finalDbState = await capturePreRestoreSnapshot();
+    const comparison = compareCanonicalStates(finalDbState, durableSnapshot);
+    if (!comparison.equal) {
+      const errMsg = `Startup rollback state comparison mismatch on collections: ${comparison.mismatches.join(', ')}`;
+      console.error(`[AUDIT-012] ${errMsg}`);
+      await setDurableRestoreOperation({
+        ...currentOp,
+        state: 'RECOVERY_FAILED_MANUAL_INTERVENTION_REQUIRED',
+        lastError: errMsg,
+        heartbeatAt: Date.now(),
+      });
+      return { recovered: false, status: 'RECOVERY_FAILED_CORRUPT_SNAPSHOT', opId: currentOp.opId, error: errMsg };
+    }
+
+    await setDurableRestoreOperation({
+      ...currentOp,
+      state: 'ROLLED_BACK',
+      recoveryStatus: 'Compensating rollback succeeded; full canonical state restored',
+      heartbeatAt: Date.now(),
+    });
+    clearRestoreLock();
+
+    await auditLog('restore_startup_recovery_succeeded', 'system', 'system', { opId: currentOp.opId, stateHash: comparison.hashA });
+    console.log(`[AUDIT-012] Startup crash recovery completed successfully. State hash: ${comparison.hashA}`);
+    return { recovered: true, status: 'ROLLED_BACK_CRASH', opId: currentOp.opId, stateHash: comparison.hashA };
+  }
+
+  return { recovered: false, status: 'NO_OP' };
 }
 
 export async function buildBackupV1Export(): Promise<NormalizedBackup> {
@@ -1224,12 +1581,28 @@ export async function buildBackupV1Export(): Promise<NormalizedBackup> {
 
 export function requireNoActiveRestore(req: express.Request, res: express.Response, next: express.NextFunction) {
   const lock = getRestoreLock();
-  if (lock && lock.state !== 'IDLE') {
-    return res.status(503).json({
-      error: 'Maintenance mode: database restore in progress. Please retry after restore completes.',
-      code: 'RESTORE_IN_PROGRESS',
-      lock: { state: lock.state, opId: lock.opId, startedAt: lock.startedAt }
-    });
+  if (lock) {
+    if (lock.state === 'RECOVERY_FAILED_MANUAL_INTERVENTION_REQUIRED' || lock.state === 'FAILED') {
+      return res.status(503).json({
+        error: 'Maintenance mode: database recovery failed and requires manual administrator intervention.',
+        code: 'RESTORE_RECOVERY_REQUIRED',
+        lock,
+      });
+    }
+    const isBlocking =
+      lock.state === 'PREPARING' ||
+      lock.state === 'SNAPSHOT_READY' ||
+      lock.state === 'RESTORING' ||
+      lock.state === 'VERIFYING' ||
+      lock.state === 'ROLLING_BACK';
+
+    if (isBlocking) {
+      return res.status(503).json({
+        error: 'Maintenance mode: database restore in progress. Please retry after restore completes.',
+        code: 'RESTORE_IN_PROGRESS',
+        lock,
+      });
+    }
   }
   next();
 }
@@ -1396,6 +1769,13 @@ export async function executeSaleTransaction(salePayload: any): Promise<SaleTran
 }
 
 async function startServer() {
+  // Execute startup check for uncompleted restore operations (AUDIT-012 Crash Safety)
+  try {
+    await recoverPendingRestoreOperation();
+  } catch (e: any) {
+    console.error("[AUDIT-012] Startup recovery check encountered an error:", e.message);
+  }
+
   const app = express();
   const PORT = parseInt(process.env.PORT || "3000", 10);
 
