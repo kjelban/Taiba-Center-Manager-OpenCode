@@ -40,6 +40,23 @@ export const AttendanceService = {
     return subscribeToCollection<Attendance>(COLLECTIONS.ATTENDANCE, callback);
   },
 
+  getActiveSession: async (employeeId?: string): Promise<Attendance | null> => {
+    const token = getServerSessionToken();
+    if (!token) return null;
+    try {
+      const resp = await fetch('/api/attendance/active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ employeeId }),
+      });
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      return data.session || null;
+    } catch {
+      return null;
+    }
+  },
+
   clockIn: async (employee: Employee): Promise<Attendance> => {
     const token = getServerSessionToken();
     if (!token) throw new Error('Not authenticated');
@@ -52,7 +69,8 @@ export const AttendanceService = {
       const data = await resp.json().catch(() => ({}));
       throw new Error(data.error || 'Clock-in failed');
     }
-    return await resp.json();
+    const data = await resp.json();
+    return data.record || data;
   },
 
   clockOut: async (recordId: string): Promise<void> => {
@@ -61,7 +79,7 @@ export const AttendanceService = {
     const resp = await fetch('/api/clockout', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ id: recordId }),
+      body: JSON.stringify({ attendanceId: recordId, id: recordId }),
     });
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));

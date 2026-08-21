@@ -38,16 +38,12 @@ interface SessionProviderProps {
 
 export const SessionProvider: React.FC<SessionProviderProps> = ({ children }) => {
   const [currentSession, setCurrentSession] = useState<Attendance | null>(() => {
-    const lastInfoRaw = localStorage.getItem(STORAGE_KEY_LAST_SESSION);
-    if (lastInfoRaw) {
+    const stored = localStorage.getItem(STORAGE_KEY_SESSION);
+    if (stored) {
       try {
-        const info = JSON.parse(lastInfoRaw);
-        const elapsed = Date.now() - new Date(info.lastActivity).getTime();
-        if (elapsed <= 30_000) {
-          const stored = localStorage.getItem(STORAGE_KEY_SESSION);
-          if (stored) {
-            return JSON.parse(stored);
-          }
+        const parsed = JSON.parse(stored);
+        if (parsed?.id && parsed?.checkInTime && !parsed?.checkOutTime) {
+          return parsed;
         }
       } catch {}
     }

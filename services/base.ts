@@ -1,20 +1,32 @@
 import { db } from './firebase';
 import { collection, getDocs, onSnapshot } from 'firebase/firestore';
 
-// Server session token (set after login via /api/auth/login)
-let serverSessionToken: string | null = null;
+const STORAGE_KEY_AUTH_TOKEN = 'taiba_auth_token';
+
+// Server session token (set after login via /api/auth/login, persisted across refreshes)
+let serverSessionToken: string | null = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY_AUTH_TOKEN) : null;
 
 export function setServerSessionToken(token: string | null) {
   serverSessionToken = token;
+  if (typeof localStorage !== 'undefined') {
+    if (token) {
+      localStorage.setItem(STORAGE_KEY_AUTH_TOKEN, token);
+    } else {
+      localStorage.removeItem(STORAGE_KEY_AUTH_TOKEN);
+    }
+  }
 }
 
 export function getServerSessionToken(): string | null {
+  if (!serverSessionToken && typeof localStorage !== 'undefined') {
+    serverSessionToken = localStorage.getItem(STORAGE_KEY_AUTH_TOKEN);
+  }
   return serverSessionToken;
 }
 
 export async function logoutSession(): Promise<void> {
   try {
-    const token = serverSessionToken;
+    const token = getServerSessionToken();
     if (token) {
       await fetch('/api/auth/logout', {
         method: 'POST',
@@ -22,7 +34,7 @@ export async function logoutSession(): Promise<void> {
       });
     }
   } catch {}
-  serverSessionToken = null;
+  setServerSessionToken(null);
 }
 
 async function getIdToken(): Promise<string> {

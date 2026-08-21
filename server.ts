@@ -237,6 +237,58 @@ export async function firestoreDeleteDocument(collection: string, id: string) {
   if (!resp.ok && resp.status !== 404) throw new Error(`Firestore DELETE failed: ${resp.status} ${await resp.text()}`);
 }
 
+export async function firestoreFindActiveAttendance(employeeId: string): Promise<any | null> {
+  const token = await getGoogleAccessToken();
+  const baseUrl = getFirestoreBaseUrl();
+  const queryBody = {
+    structuredQuery: {
+      from: [{ collectionId: "attendance" }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: "employeeId" },
+          op: "EQUAL",
+          value: { stringValue: employeeId }
+        }
+      },
+      limit: 50
+    }
+  };
+
+  const resp = await fetch(`${baseUrl}/documents:runQuery`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(queryBody),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`Firestore runQuery failed: ${resp.status} ${errText}`);
+  }
+
+  const results = (await resp.json()) as any[];
+  const activeDocs: any[] = [];
+  for (const item of results) {
+    if (item.document && item.document.fields) {
+      const doc: Record<string, any> = { id: item.document.name.split("/").pop() };
+      for (const [k, v] of Object.entries(item.document.fields)) {
+        doc[k] = firestoreValueToJs(v as any);
+      }
+      if (!doc.checkOutTime) {
+        activeDocs.push(doc);
+      }
+    }
+  }
+
+  if (activeDocs.length === 0) return null;
+  // If multiple exist due to historical orphaned shifts, sort by checkInTime descending
+  activeDocs.sort((a, b) => {
+    const tA = new Date(a.checkInTime || 0).getTime();
+    const tB = new Date(b.checkInTime || 0).getTime();
+    return tB - tA;
+  });
+  return activeDocs[0];
+}
+
 // ---- Firestore Transaction Engine (Optimistic Concurrency Control) ----
 
 export interface FirestoreTransaction {
@@ -384,6 +436,137 @@ export async function runFirestoreTransaction<T>(
   }
 
   throw new Error("Firestore transaction exceeded maximum retries due to contention.");
+}
+
+// ---- Attendance transactional business functions (AUDIT-004 Enforced) ----
+
+export async function executeClockIn(payload: {
+  employeeId: string;
+  employeeName?: string;
+  date?: string;
+  checkInTime?: string;
+}): Promise<{ ok: boolean; id: string; record: any; alreadyActive: boolean }> {
+  const { employeeId, employeeName, date, checkInTime } = payload;
+  if (!employeeId || !isValidDocumentId(employeeId)) {
+    const err: any = new Error("Missing or invalid employeeId");
+    err.status = 400;
+    throw err;
+  }
+
+  return await runFirestoreTransaction(async (txn) => {
+    // 1. Check employee doc for active shift pointer
+    const empDoc = await txn.get('employees', employeeId);
+    if (empDoc && empDoc.data && empDoc.data.activeAttendanceId) {
+      const activeDoc = await txn.get('attendance', empDoc.data.activeAttendanceId);
+      if (activeDoc && activeDoc.data && !activeDoc.data.checkOutTime) {
+        return {
+          ok: true,
+          id: activeDoc.data.id,
+          record: activeDoc.data,
+          alreadyActive: true,
+        };
+      }
+    }
+
+    // 2. Query fallback for existing active attendance
+    const queryActive = await firestoreFindActiveAttendance(employeeId);
+    if (queryActive && !queryActive.checkOutTime) {
+      if (empDoc && empDoc.data) {
+        txn.update('employees', employeeId, { ...empDoc.data, activeAttendanceId: queryActive.id });
+      }
+      return {
+        ok: true,
+        id: queryActive.id,
+        record: queryActive,
+        alreadyActive: true,
+      };
+    }
+
+    // 3. Create new attendance record
+    const id = crypto.randomUUID();
+    const now = checkInTime || new Date().toISOString();
+    const record = {
+      id,
+      employeeId,
+      employeeName: employeeName || empDoc?.data?.name || '',
+      date: date || now.split('T')[0],
+      checkInTime: now,
+      checkOutTime: null,
+      durationMinutes: null,
+    };
+
+    txn.set('attendance', id, record);
+    if (empDoc && empDoc.data) {
+      txn.update('employees', employeeId, { ...empDoc.data, activeAttendanceId: id });
+    }
+
+    return { ok: true, id, record, alreadyActive: false };
+  });
+}
+
+export async function executeClockOut(payload: {
+  attendanceId: string;
+  checkOutTime?: string;
+  durationMinutes?: number;
+}): Promise<{ ok: boolean; record: any; alreadyClosed: boolean }> {
+  const { attendanceId, checkOutTime, durationMinutes } = payload;
+  if (!attendanceId || !isValidDocumentId(attendanceId)) {
+    const err: any = new Error("Missing or invalid attendanceId");
+    err.status = 400;
+    throw err;
+  }
+
+  return await runFirestoreTransaction(async (txn) => {
+    // 1. Read Phase (ALL reads strictly before any writes)
+    const docWrapper = await txn.get('attendance', attendanceId);
+    if (!docWrapper || !docWrapper.data) {
+      const err: any = new Error("Attendance record not found");
+      err.status = 404;
+      throw err;
+    }
+    const doc = docWrapper.data;
+
+    // Idempotency: if already clocked out, return cleanly without corrupting state or duration
+    if (doc.checkOutTime) {
+      return { ok: true, record: doc, alreadyClosed: true };
+    }
+
+    let empWrapper: any = null;
+    if (doc.employeeId) {
+      empWrapper = await txn.get('employees', doc.employeeId);
+    }
+
+    // 2. Write Phase
+    const now = checkOutTime || new Date().toISOString();
+    const checkInMs = new Date(doc.checkInTime).getTime();
+    const checkOutMs = new Date(now).getTime();
+    const safeDuration = (Number.isFinite(checkInMs) && checkOutMs >= checkInMs)
+      ? Math.max(0, Math.round((checkOutMs - checkInMs) / 60000))
+      : 0;
+    const finalDuration = (typeof durationMinutes === 'number' && Number.isFinite(durationMinutes) && durationMinutes >= 0)
+      ? durationMinutes
+      : safeDuration;
+
+    const updated = {
+      ...doc,
+      checkOutTime: now,
+      durationMinutes: finalDuration,
+    };
+
+    txn.update('attendance', attendanceId, updated);
+
+    // Clear activeAttendanceId on employee if it points to this record
+    if (empWrapper && empWrapper.data && empWrapper.data.activeAttendanceId === attendanceId) {
+      txn.update('employees', doc.employeeId, { ...empWrapper.data, activeAttendanceId: null });
+    }
+
+    return { ok: true, record: updated, alreadyClosed: false };
+  });
+}
+
+export async function executeGetActiveAttendance(employeeId: string): Promise<any | null> {
+  if (!employeeId || !isValidDocumentId(employeeId)) return null;
+  return await firestoreFindActiveAttendance(employeeId);
 }
 
 // ---- end Firestore proxy ----
@@ -1034,11 +1217,30 @@ async function startServer() {
     }
   });
 
-  // ---- Attendance endpoints ----
+  // ---- Attendance endpoints (AUDIT-004) ----
+
+  app.post("/api/attendance/active", requireFirebaseAuth, async (req, res) => {
+    try {
+      const targetId = req.body?.employeeId || req.uid;
+      if (!targetId || !isValidDocumentId(targetId)) {
+        return res.status(400).json({ error: "Missing or invalid employeeId" });
+      }
+      const isSelf = targetId === req.uid;
+      const isAdmin = req.employee?.permissions?.includes('employees') || req.employee?.permissions?.includes('settings');
+      if (!isSelf && !isAdmin) {
+        return res.status(403).json({ error: "Cannot query attendance for another employee" });
+      }
+      const session = await executeGetActiveAttendance(targetId);
+      res.json({ ok: true, session });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 
   app.post("/api/clockout", requireFirebaseAuth, async (req, res) => {
     try {
-      const { attendanceId, checkOutTime, durationMinutes } = req.body;
+      const attendanceId = req.body?.attendanceId || req.body?.id;
+      const { checkOutTime, durationMinutes } = req.body;
       if (!attendanceId || !isValidDocumentId(attendanceId)) {
         return res.status(400).json({ error: "Missing or invalid attendanceId" });
       }
@@ -1052,47 +1254,52 @@ async function startServer() {
         return res.status(403).json({ error: "Cannot clock out for another employee" });
       }
 
-      const now = checkOutTime || new Date().toISOString();
-      const updated = {
-        ...doc,
-        checkOutTime: now,
-        durationMinutes: durationMinutes ?? (doc.checkInTime ? Math.round((new Date(now).getTime() - new Date(doc.checkInTime).getTime()) / 60000) : 0),
-      };
-      await firestoreSetDocument('attendance', attendanceId, updated);
-      await auditLog('clock_out', req.uid || '', req.employee?.email || '', { attendanceId, durationMinutes: updated.durationMinutes });
-      res.json({ ok: true });
+      const result = await executeClockOut({
+        attendanceId,
+        checkOutTime,
+        durationMinutes,
+      });
+
+      if (!result.alreadyClosed) {
+        await auditLog('clock_out', req.uid || '', req.employee?.email || '', {
+          attendanceId,
+          durationMinutes: result.record?.durationMinutes,
+        });
+      }
+      res.json({ ok: true, record: result.record, alreadyClosed: result.alreadyClosed });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      const status = e.status || 500;
+      res.status(status).json({ error: e.message });
     }
   });
 
   app.post("/api/clockin", requireFirebaseAuth, async (req, res) => {
     try {
       const { employeeId, employeeName, date, checkInTime } = req.body;
-      if (!employeeId || !isValidDocumentId(employeeId)) {
+      const targetId = employeeId || req.uid;
+      if (!targetId || !isValidDocumentId(targetId)) {
         return res.status(400).json({ error: "Missing or invalid employeeId" });
       }
-      const isSelf = employeeId === req.uid;
+      const isSelf = targetId === req.uid;
       const isAdmin = req.employee?.permissions?.includes('employees') || req.employee?.permissions?.includes('settings');
       if (!isSelf && !isAdmin) {
         return res.status(403).json({ error: "Cannot clock in for another employee" });
       }
 
-      const id = crypto.randomUUID();
-      const record = {
-        id,
-        employeeId,
+      const result = await executeClockIn({
+        employeeId: targetId,
         employeeName: employeeName || req.employee?.name || '',
-        date: date || new Date().toISOString().split('T')[0],
-        checkInTime: checkInTime || new Date().toISOString(),
-        checkOutTime: null,
-        durationMinutes: null,
-      };
-      await firestoreSetDocument('attendance', id, record);
-      await auditLog('clock_in', req.uid || '', req.employee?.email || '', { attendanceId: id });
-      res.json({ ok: true, id, record });
+        date,
+        checkInTime,
+      });
+
+      if (!result.alreadyActive) {
+        await auditLog('clock_in', req.uid || '', req.employee?.email || '', { attendanceId: result.id });
+      }
+      res.json(result);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      const status = e.status || 500;
+      res.status(status).json({ error: e.message });
     }
   });
 

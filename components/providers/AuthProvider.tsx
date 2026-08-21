@@ -1,18 +1,11 @@
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
-import { Employee } from '../../types';
+import { Employee, Attendance } from '../../types';
 import { AttendanceService, EmployeeService } from '../../services/employeeService';
 import { logoutSession } from '../../services/base';
 
 const STORAGE_KEY_USER = 'taiba_current_user';
 const STORAGE_KEY_SESSION = 'taiba_current_session';
 const STORAGE_KEY_LAST_SESSION = 'taiba_last_session';
-const SESSION_FRESHNESS_MS = 30_000;
-
-interface LastSessionInfo {
-  employeeId: string;
-  sessionId: string;
-  lastActivity: string;
-}
 
 interface AuthContextType {
   currentUser: Employee | null;
@@ -39,7 +32,9 @@ interface AuthProviderProps {
 async function closeSession(sessionId: string): Promise<void> {
   try {
     await AttendanceService.clockOut(sessionId);
-  } catch {}
+  } catch (e) {
+    console.warn('Attendance clock-out warning:', e);
+  }
 }
 
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
@@ -70,19 +65,33 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         setCurrentUser(fresh);
         localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(fresh));
 
-        const lastInfoRaw = localStorage.getItem(STORAGE_KEY_LAST_SESSION);
-        if (lastInfoRaw) {
-          const info: LastSessionInfo = JSON.parse(lastInfoRaw);
-          const elapsed = Date.now() - new Date(info.lastActivity).getTime();
-          if (elapsed > SESSION_FRESHNESS_MS) {
-            localStorage.removeItem(STORAGE_KEY_SESSION);
-            localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
-          }
+        // Restore active attendance session without synthetic time-based expiration
+        let activeSession: Attendance | null = null;
+        const storedSession = localStorage.getItem(STORAGE_KEY_SESSION);
+        if (storedSession) {
+          try {
+            const parsed = JSON.parse(storedSession);
+            if (parsed?.id && parsed?.checkInTime && !parsed?.checkOutTime) {
+              activeSession = parsed;
+            }
+          } catch {}
         }
-      } catch {
-        localStorage.removeItem(STORAGE_KEY_USER);
-        localStorage.removeItem(STORAGE_KEY_SESSION);
-        localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
+
+        // If local storage did not have an open shift, query authoritative server
+        if (!activeSession) {
+          activeSession = await AttendanceService.getActiveSession(fresh.id);
+        }
+
+        if (activeSession) {
+          localStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(activeSession));
+          localStorage.setItem(STORAGE_KEY_LAST_SESSION, JSON.stringify({
+            employeeId: fresh.id,
+            sessionId: activeSession.id,
+            lastActivity: new Date().toISOString(),
+          }));
+        }
+      } catch (err) {
+        console.warn('User session restoration warning:', err);
       } finally {
         setIsInitialLoading(false);
       }
@@ -91,36 +100,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   }, []);
 
   const handleLogin = useCallback(async (employee: Employee) => {
-    const lastInfoRaw = localStorage.getItem(STORAGE_KEY_LAST_SESSION);
-    if (lastInfoRaw) {
-      try {
-        const info: LastSessionInfo = JSON.parse(lastInfoRaw);
-        const sameEmployee = info.employeeId === employee.id;
-        const elapsed = Date.now() - new Date(info.lastActivity).getTime();
+    // 1. Check if employee already has an active open shift in Firestore
+    let session: Attendance | null = await AttendanceService.getActiveSession(employee.id);
 
-        if (sameEmployee && elapsed <= SESSION_FRESHNESS_MS) {
-          const stored = localStorage.getItem(STORAGE_KEY_SESSION);
-          if (stored) {
-            const session = JSON.parse(stored);
-            if (session?.id && session?.checkInTime && !session?.checkOutTime) {
-              setCurrentUser(employee);
-              localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(employee));
-              info.lastActivity = new Date().toISOString();
-              localStorage.setItem(STORAGE_KEY_LAST_SESSION, JSON.stringify(info));
-              return;
-            }
-          }
-        }
-
-        if (info.sessionId) {
-          await closeSession(info.sessionId);
-        }
-        localStorage.removeItem(STORAGE_KEY_LAST_SESSION);
-        localStorage.removeItem(STORAGE_KEY_SESSION);
-      } catch {}
+    // 2. If no existing active shift in Firestore, clock-in a new shift
+    if (!session) {
+      session = await AttendanceService.clockIn(employee);
     }
 
-    const session = await AttendanceService.clockIn(employee);
+    // 3. Persist session state
     const sessionWithActivity = { ...session, lastActivity: new Date().toISOString() };
     localStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(sessionWithActivity));
     localStorage.setItem(STORAGE_KEY_LAST_SESSION, JSON.stringify({
@@ -148,9 +136,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }
     if (!sessionId && lastInfoRaw) {
       try {
-        const info: LastSessionInfo = JSON.parse(lastInfoRaw);
+        const info = JSON.parse(lastInfoRaw);
         if (info.sessionId) sessionId = info.sessionId;
       } catch {}
+    }
+
+    // Authoritative fallback: retrieve open session from server if local cache was cleared
+    if (!sessionId && currentUser?.id) {
+      const active = await AttendanceService.getActiveSession(currentUser.id);
+      if (active?.id) sessionId = active.id;
     }
 
     if (sessionId) {
@@ -162,7 +156,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     localStorage.removeItem(STORAGE_KEY_USER);
     await logoutSession();
     setCurrentUser(null);
-  }, []);
+  }, [currentUser]);
 
   return (
     <AuthContext.Provider value={{ currentUser, isInitialLoading, handleLogin, confirmLogout, setCurrentUser }}>
