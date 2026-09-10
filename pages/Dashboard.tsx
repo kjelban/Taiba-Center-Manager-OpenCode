@@ -89,7 +89,7 @@ const Dashboard: React.FC = () => {
     const unsubSales = DataService.subscribeToSales(sales => {
         currentSales = sales;
         updateDashboard();
-    });
+    }, { limit: 100, orderByField: 'date', orderDirection: 'desc' });
 
     const unsubProducts = DataService.subscribeToProducts(products => {
         currentProducts = products;

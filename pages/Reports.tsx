@@ -20,19 +20,42 @@ const Reports: React.FC = () => {
   const [dateFrom, setDateFrom] = useState(yearStart);
   const [dateTo, setDateTo] = useState(today);
 
+  // Date-bounded queries for growing collections (AUDIT-007)
   useEffect(() => {
-    const unsubSales = DataService.subscribeToSales(setSales);
-    const unsubExpenses = DataService.subscribeToExpenses(setExpenses);
+    let active = true;
+    const from = dateFrom ? `${dateFrom}T00:00:00.000Z` : `${yearStart}T00:00:00.000Z`;
+    const to = dateTo ? `${dateTo}T23:59:59.999Z` : `${today}T23:59:59.999Z`;
+
+    Promise.all([
+      DataService.getSalesByDateRange(from, to),
+      DataService.getExpensesByDateRange(from, to),
+      DataService.getAttendanceByDateRange(from, to),
+    ]).then(([rangeSales, rangeExpenses, rangeAttendance]) => {
+      if (!active) return;
+      setSales(rangeSales);
+      setExpenses(rangeExpenses);
+      rangeAttendance.sort((a, b) => new Date(b.checkInTime).getTime() - new Date(a.checkInTime).getTime());
+      setAttendanceRecords(rangeAttendance);
+    }).catch(err => {
+      console.error("Failed to load reports data for date range:", err);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [dateFrom, dateTo]);
+
+  // Small bounded collections (employees, product catalog)
+  useEffect(() => {
     const unsubEmployees = DataService.subscribeToEmployees(setEmployees);
     const unsubProducts = DataService.subscribeToProducts(setProducts);
-    const unsubAttendance = DataService.subscribeToAttendance(data => {
-      data.sort((a, b) => new Date(b.checkInTime).getTime() - new Date(a.checkInTime).getTime());
-      setAttendanceRecords(data);
-    });
-    return () => { unsubSales(); unsubExpenses(); unsubEmployees(); unsubProducts(); unsubAttendance(); };
+    return () => {
+      unsubEmployees();
+      unsubProducts();
+    };
   }, []);
 
-  // Overall totals (all time)
+  // Overall totals for selected period
   const overall = useMemo(() => {
     const totalRevenue = sales.reduce((sum, s) => sum + s.totalAmount, 0);
     const totalProfit = sales.reduce((sum, s) => sum + s.profit, 0);
@@ -43,24 +66,10 @@ const Reports: React.FC = () => {
     return { totalRevenue, totalProfit, totalExpenses, netIncome };
   }, [sales, expenses, employees]);
 
-  // Filtered data for selected period
-  const filteredSales = useMemo(() => {
-    const from = new Date(dateFrom);
-    const to = new Date(dateTo + 'T23:59:59');
-    return sales.filter(s => {
-      const d = new Date(s.date);
-      return d >= from && d <= to;
-    });
-  }, [sales, dateFrom, dateTo]);
+  // Data for selected period (already bounded by Firestore date-range query)
+  const filteredSales = useMemo(() => sales, [sales]);
 
-  const filteredExpenses = useMemo(() => {
-    const from = new Date(dateFrom);
-    const to = new Date(dateTo + 'T23:59:59');
-    return expenses.filter(e => {
-      const d = new Date(e.date);
-      return d >= from && d <= to;
-    });
-  }, [expenses, dateFrom, dateTo]);
+  const filteredExpenses = useMemo(() => expenses, [expenses]);
 
   const period = useMemo(() => {
     const totalRevenue = filteredSales.reduce((sum, s) => sum + s.totalAmount, 0);

@@ -1,5 +1,5 @@
 import { Sale } from '../types';
-import { COLLECTIONS, getAll, subscribeToCollection, handleFirestoreError, OperationType } from './base';
+import { COLLECTIONS, getAll, subscribeToCollection, handleFirestoreError, OperationType, ClientQueryOptions } from './base';
 
 async function post(endpoint: string, body: any): Promise<any> {
   const res = await fetch(endpoint, {
@@ -16,12 +16,31 @@ async function post(endpoint: string, body: any): Promise<any> {
 }
 
 export const SaleService = {
-  getSales: async (): Promise<Sale[]> => {
-    return await getAll<Sale>(COLLECTIONS.SALES);
+  getSales: async (options?: ClientQueryOptions): Promise<Sale[]> => {
+    return await getAll<Sale>(COLLECTIONS.SALES, options);
   },
 
-  subscribeToSales: (callback: (sales: Sale[]) => void) => {
-    return subscribeToCollection<Sale>(COLLECTIONS.SALES, callback);
+  subscribeToSales: (callback: (sales: Sale[]) => void, options?: ClientQueryOptions) => {
+    return subscribeToCollection<Sale>(COLLECTIONS.SALES, callback, options);
+  },
+
+  subscribeToRecentSales: (callback: (sales: Sale[]) => void, limitCount = 50) => {
+    return subscribeToCollection<Sale>(COLLECTIONS.SALES, callback, {
+      orderByField: 'date',
+      orderDirection: 'desc',
+      limit: limitCount,
+    });
+  },
+
+  getSalesByDateRange: async (from: string, to: string): Promise<Sale[]> => {
+    return await getAll<Sale>(COLLECTIONS.SALES, {
+      where: [
+        { field: 'date', op: '>=', value: from },
+        { field: 'date', op: '<=', value: to },
+      ],
+      orderByField: 'date',
+      orderDirection: 'desc',
+    });
   },
 
   createSale: async (sale: Sale): Promise<void> => {

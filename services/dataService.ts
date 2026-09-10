@@ -27,6 +27,8 @@ export const DataService = {
   // Sale methods
   getSales: SaleService.getSales,
   subscribeToSales: SaleService.subscribeToSales,
+  subscribeToRecentSales: SaleService.subscribeToRecentSales,
+  getSalesByDateRange: SaleService.getSalesByDateRange,
   createSale: SaleService.createSale,
   updateSale: SaleService.updateSale,
   deleteSale: SaleService.deleteSale,
@@ -45,6 +47,8 @@ export const DataService = {
   // Expense methods
   getExpenses: ExpenseService.getExpenses,
   subscribeToExpenses: ExpenseService.subscribeToExpenses,
+  subscribeToRecentExpenses: ExpenseService.subscribeToRecentExpenses,
+  getExpensesByDateRange: ExpenseService.getExpensesByDateRange,
   addExpense: ExpenseService.addExpense,
   deleteExpense: ExpenseService.deleteExpense,
 
@@ -57,6 +61,8 @@ export const DataService = {
   // Attendance methods
   getAttendance: AttendanceService.getAttendance,
   subscribeToAttendance: AttendanceService.subscribeToAttendance,
+  subscribeToRecentAttendance: AttendanceService.subscribeToRecentAttendance,
+  getAttendanceByDateRange: AttendanceService.getAttendanceByDateRange,
   clockIn: AttendanceService.clockIn,
   clockOut: AttendanceService.clockOut,
 

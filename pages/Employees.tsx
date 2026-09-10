@@ -50,11 +50,11 @@ const Employees: React.FC = () => {
     const unsubAttendance = DataService.subscribeToAttendance(data => {
         data.sort((a, b) => new Date(b.checkInTime).getTime() - new Date(a.checkInTime).getTime());
         setAttendanceRecords(data);
-    });
+    }, { limit: 100, orderByField: 'checkInTime', orderDirection: 'desc' });
     const unsubSales = DataService.subscribeToSales(data => {
         data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         setSales(data);
-    });
+    }, { limit: 100, orderByField: 'date', orderDirection: 'desc' });
 
     return () => {
         unsubEmployees();

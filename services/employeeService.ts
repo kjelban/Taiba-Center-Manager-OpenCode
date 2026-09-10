@@ -35,12 +35,35 @@ export const EmployeeService = {
 };
 
 export const AttendanceService = {
-  getAttendance: async (): Promise<Attendance[]> => {
-    return await getAll<Attendance>(COLLECTIONS.ATTENDANCE);
+  getAttendance: async (options?: any): Promise<Attendance[]> => {
+    return await getAll<Attendance>(COLLECTIONS.ATTENDANCE, options);
   },
 
-  subscribeToAttendance: (callback: (attendance: Attendance[]) => void) => {
-    return subscribeToCollection<Attendance>(COLLECTIONS.ATTENDANCE, callback);
+  subscribeToAttendance: (callback: (attendance: Attendance[]) => void, options?: any) => {
+    return subscribeToCollection<Attendance>(COLLECTIONS.ATTENDANCE, callback, options);
+  },
+
+  subscribeToRecentAttendance: (callback: (attendance: Attendance[]) => void, limitCount = 50) => {
+    return subscribeToCollection<Attendance>(COLLECTIONS.ATTENDANCE, callback, {
+      orderByField: 'checkInTime',
+      orderDirection: 'desc',
+      limit: limitCount,
+    });
+  },
+
+  getAttendanceByDateRange: async (from: string, to: string, employeeId?: string): Promise<Attendance[]> => {
+    const whereConstraints: any[] = [
+      { field: 'checkInTime', op: '>=', value: from },
+      { field: 'checkInTime', op: '<=', value: to },
+    ];
+    if (employeeId && employeeId !== 'all') {
+      whereConstraints.push({ field: 'employeeId', op: '==', value: employeeId });
+    }
+    return await getAll<Attendance>(COLLECTIONS.ATTENDANCE, {
+      where: whereConstraints,
+      orderByField: 'checkInTime',
+      orderDirection: 'desc',
+    });
   },
 
   getActiveSession: async (employeeId?: string): Promise<Attendance | null> => {

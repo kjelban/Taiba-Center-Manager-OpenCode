@@ -16,15 +16,17 @@ const Invoices: React.FC<InvoicesProps> = ({ currentUser, onEditInvoice }) => {
   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
   const [filterType, setFilterType] = useState<'ALL' | 'DEBT' | 'PAID_DEBT'>('ALL');
 
+  const [pageSize, setPageSize] = useState(50);
+
   const canModify = currentUser?.permissions.includes('settings') || currentUser?.role === 'مدير';
 
   useEffect(() => {
     const unsub = DataService.subscribeToSales(data => {
         data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         setSales(data);
-    });
+    }, { limit: pageSize, orderByField: 'date', orderDirection: 'desc' });
     return () => unsub();
-  }, []);
+  }, [pageSize]);
 
   const handleOpenDetails = (sale: Sale) => {
     setSelectedSale(sale);
@@ -182,6 +184,16 @@ const Invoices: React.FC<InvoicesProps> = ({ currentUser, onEditInvoice }) => {
             ))}
           </tbody>
         </table>
+        {sales.length >= pageSize && (
+          <div className="p-4 border-t border-slate-100 flex justify-center bg-slate-50">
+            <button
+              onClick={() => setPageSize(prev => prev + 50)}
+              className="px-6 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-100 shadow-sm transition-colors"
+            >
+              تحميل المزيد من الفواتير ({sales.length} معروضة)
+            </button>
+          </div>
+        )}
       </div>
 
       {selectedSale && (

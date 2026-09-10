@@ -1,13 +1,32 @@
 import { Expense } from '../types';
-import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection } from './base';
+import { COLLECTIONS, getAll, setData, deleteData, subscribeToCollection, ClientQueryOptions } from './base';
 
 export const ExpenseService = {
-  getExpenses: async (): Promise<Expense[]> => {
-    return await getAll<Expense>(COLLECTIONS.EXPENSES);
+  getExpenses: async (options?: ClientQueryOptions): Promise<Expense[]> => {
+    return await getAll<Expense>(COLLECTIONS.EXPENSES, options);
   },
 
-  subscribeToExpenses: (callback: (expenses: Expense[]) => void) => {
-    return subscribeToCollection<Expense>(COLLECTIONS.EXPENSES, callback);
+  subscribeToExpenses: (callback: (expenses: Expense[]) => void, options?: ClientQueryOptions) => {
+    return subscribeToCollection<Expense>(COLLECTIONS.EXPENSES, callback, options);
+  },
+
+  subscribeToRecentExpenses: (callback: (expenses: Expense[]) => void, limitCount = 50) => {
+    return subscribeToCollection<Expense>(COLLECTIONS.EXPENSES, callback, {
+      orderByField: 'date',
+      orderDirection: 'desc',
+      limit: limitCount,
+    });
+  },
+
+  getExpensesByDateRange: async (from: string, to: string): Promise<Expense[]> => {
+    return await getAll<Expense>(COLLECTIONS.EXPENSES, {
+      where: [
+        { field: 'date', op: '>=', value: from },
+        { field: 'date', op: '<=', value: to },
+      ],
+      orderByField: 'date',
+      orderDirection: 'desc',
+    });
   },
 
   addExpense: async (expense: Expense): Promise<void> => {

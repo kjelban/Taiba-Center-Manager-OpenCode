@@ -8,6 +8,11 @@ import {
   validateProxyPayload,
   validateSalePayload,
   normalizeCartStockItems,
+  validateQueryParameters,
+  encodeQueryCursor,
+  decodeQueryCursor,
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
 } from './server-auth';
 
 // ── isValidCollection ──
@@ -540,3 +545,72 @@ describe('AUDIT-012: Backup Validation & Integrity Unit Tests', () => {
     clearRestoreLock();
   });
 });
+
+describe('AUDIT-007: Query Validation & Pagination Unit Tests', () => {
+  it('QUERY-007-U01: Default limit applied when limit is omitted (50)', () => {
+    const res = validateQueryParameters({ collection: 'sales' });
+    expect(res.error).toBeUndefined();
+    expect(res.options?.limit).toBe(DEFAULT_PAGE_SIZE);
+    expect(res.options?.limit).toBe(50);
+  });
+
+  it('QUERY-007-U02: Custom valid limit accepted within 1..100', () => {
+    const res = validateQueryParameters({ collection: 'sales', limit: 25 });
+    expect(res.error).toBeUndefined();
+    expect(res.options?.limit).toBe(25);
+  });
+
+  it('QUERY-007-U03: Limit > 100 capped to 100 (MAX_PAGE_SIZE)', () => {
+    const res = validateQueryParameters({ collection: 'sales', limit: 100000 });
+    expect(res.error).toBeUndefined();
+    expect(res.options?.limit).toBe(MAX_PAGE_SIZE);
+    expect(res.options?.limit).toBe(100);
+  });
+
+  it('QUERY-007-U04: Negative, zero, float, or invalid limits rejected with error', () => {
+    expect(validateQueryParameters({ collection: 'sales', limit: -1 }).error).toBeDefined();
+    expect(validateQueryParameters({ collection: 'sales', limit: 0 }).error).toBeDefined();
+    expect(validateQueryParameters({ collection: 'sales', limit: 10.5 }).error).toBeDefined();
+    expect(validateQueryParameters({ collection: 'sales', limit: 'invalid' }).error).toBeDefined();
+  });
+
+  it('QUERY-007-U05: Unallowlisted collection rejected', () => {
+    expect(validateQueryParameters({ collection: 'super_secrets' }).error).toContain('Invalid or unallowlisted collection');
+    expect(validateQueryParameters({ collection: '' }).error).toContain('Invalid or unallowlisted collection');
+  });
+
+  it('QUERY-007-U06: Unallowlisted orderByField rejected', () => {
+    const res = validateQueryParameters({ collection: 'sales', orderByField: 'malicious_sql_injection' });
+    expect(res.error).toContain('Invalid orderByField');
+  });
+
+  it('QUERY-007-U07: Invalid orderDirection rejected', () => {
+    const res = validateQueryParameters({ collection: 'sales', orderDirection: 'SIDEWAYS' });
+    expect(res.error).toContain("orderDirection must be either 'ASC' or 'DESC'");
+  });
+
+  it('QUERY-007-U08: Valid cursor encoded and decoded correctly', () => {
+    const cursorStr = encodeQueryCursor('2026-08-21T12:00:00.000Z', 'sale_123');
+    expect(typeof cursorStr).toBe('string');
+    const decoded = decodeQueryCursor(cursorStr);
+    expect(decoded).not.toBeNull();
+    expect(decoded?.primary).toBe('2026-08-21T12:00:00.000Z');
+    expect(decoded?.id).toBe('sale_123');
+
+    const res = validateQueryParameters({ collection: 'sales', cursor: cursorStr });
+    expect(res.error).toBeUndefined();
+    expect(res.options?.cursor?.id).toBe('sale_123');
+  });
+
+  it('QUERY-007-U09: Corrupted or malformed cursor rejected', () => {
+    expect(validateQueryParameters({ collection: 'sales', cursor: 'not-a-valid-cursor!!!' }).error).toContain('Invalid or malformed pagination cursor');
+    expect(validateQueryParameters({ collection: 'sales', cursor: Buffer.from('{"v":1}').toString('base64url') }).error).toContain('Invalid or malformed pagination cursor');
+  });
+
+  it('QUERY-007-U10: Invalid date strings and inverted date range rejected', () => {
+    expect(validateQueryParameters({ collection: 'sales', dateFrom: 'not-a-date' }).error).toContain('Invalid dateFrom format');
+    expect(validateQueryParameters({ collection: 'sales', dateTo: 'not-a-date' }).error).toContain('Invalid dateTo format');
+    expect(validateQueryParameters({ collection: 'sales', dateFrom: '2026-12-31', dateTo: '2026-01-01' }).error).toContain('cannot be after');
+  });
+});
+

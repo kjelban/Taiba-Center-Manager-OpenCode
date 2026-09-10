@@ -13,13 +13,15 @@ const Expenses: React.FC = () => {
     date: new Date().toISOString().split('T')[0]
   });
 
+  const [pageSize, setPageSize] = useState(50);
+
   useEffect(() => {
     const unsub = DataService.subscribeToExpenses(data => {
         data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         setExpenses(data);
-    });
+    }, { limit: pageSize, orderByField: 'date', orderDirection: 'desc' });
     return () => unsub();
-  }, []);
+  }, [pageSize]);
 
   const handleDelete = async (id: string) => {
     if (window.confirm('هل أنت متأكد من حذف هذا المصروف؟')) {
@@ -117,6 +119,16 @@ const Expenses: React.FC = () => {
             )}
           </tbody>
         </table>
+        {expenses.length >= pageSize && (
+          <div className="p-4 border-t border-slate-100 flex justify-center bg-slate-50">
+            <button
+              onClick={() => setPageSize(prev => prev + 50)}
+              className="px-6 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-100 shadow-sm transition-colors"
+            >
+              تحميل المزيد من المصروفات ({expenses.length} معروضة)
+            </button>
+          </div>
+        )}
       </div>
 
       {isModalOpen && (

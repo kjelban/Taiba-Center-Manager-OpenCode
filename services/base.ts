@@ -1,5 +1,15 @@
 import { db } from './firebase';
-import { collection, getDocs, onSnapshot } from 'firebase/firestore';
+import {
+  collection,
+  getDocs,
+  onSnapshot,
+  query,
+  where,
+  orderBy,
+  limit,
+  startAfter,
+  WhereFilterOp,
+} from 'firebase/firestore';
 
 // Proactive legacy localStorage cleanup on initialization
 if (typeof localStorage !== 'undefined') {
@@ -63,6 +73,44 @@ export async function proxyBatchSet(writes: { collection: string; id: string; da
   return doFetch('/api/proxy/batch', { writes: writes.map(w => ({ type: "set", collection: w.collection, id: w.id, data: w.data })) });
 }
 
+export interface ClientQueryConstraint {
+  field: string;
+  op: WhereFilterOp;
+  value: any;
+}
+
+export interface ClientQueryOptions {
+  limit?: number;
+  orderByField?: string;
+  orderDirection?: 'asc' | 'desc';
+  where?: ClientQueryConstraint[];
+  startAfterDoc?: any;
+}
+
+export async function queryServerCollection<T>(options: {
+  collection: string;
+  limit?: number;
+  cursor?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  dateField?: string;
+  orderByField?: string;
+  orderDirection?: 'ASC' | 'DESC';
+  filterField?: string;
+  filterValue?: any;
+}): Promise<{ ok: boolean; items: T[]; nextCursor: string | null; hasMore: boolean; totalReturned: number }> {
+  const res = await fetch('/api/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(options),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Server query failed: ${res.status} ${txt}`);
+  }
+  return res.json();
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -89,7 +137,8 @@ export const COLLECTIONS = {
   CATEGORIES: 'categories',
   SEASONS: 'seasons',
   ATTENDANCE: 'attendance',
-  METADATA: 'metadata'
+  METADATA: 'metadata',
+  AUDIT_LOGS: 'audit_logs',
 };
 
 export const sanitizeData = (obj: any): any => {
@@ -106,9 +155,30 @@ export const sanitizeData = (obj: any): any => {
   );
 };
 
-export async function getAll<T>(collectionName: string): Promise<T[]> {
+export async function getAll<T>(collectionName: string, options?: ClientQueryOptions): Promise<T[]> {
   try {
-    const querySnapshot = await getDocs(collection(db, collectionName));
+    let q: any = collection(db, collectionName);
+    if (options) {
+      const constraints: any[] = [];
+      if (options.where) {
+        for (const w of options.where) {
+          constraints.push(where(w.field, w.op, w.value));
+        }
+      }
+      if (options.orderByField) {
+        constraints.push(orderBy(options.orderByField, options.orderDirection || 'desc'));
+      }
+      if (options.startAfterDoc) {
+        constraints.push(startAfter(options.startAfterDoc));
+      }
+      if (options.limit && options.limit > 0) {
+        constraints.push(limit(options.limit));
+      }
+      if (constraints.length > 0) {
+        q = query(q, ...constraints);
+      }
+    }
+    const querySnapshot = await getDocs(q);
     return querySnapshot.docs.map(doc => doc.data() as T);
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, collectionName);
@@ -130,10 +200,37 @@ export async function deleteData(collectionName: string, id: string): Promise<vo
   }
 }
 
-export function subscribeToCollection<T>(collectionName: string, callback: (data: T[]) => void) {
-  return onSnapshot(collection(db, collectionName), (snapshot) => {
-    callback(snapshot.docs.map(doc => doc.data() as T));
-  }, (error) => {
+export function subscribeToCollection<T>(
+  collectionName: string,
+  callback: (data: T[]) => void,
+  options?: ClientQueryOptions
+) {
+  let q: any = collection(db, collectionName);
+  if (options) {
+    const constraints: any[] = [];
+    if (options.where) {
+      for (const w of options.where) {
+        constraints.push(where(w.field, w.op, w.value));
+      }
+    }
+    if (options.orderByField) {
+      constraints.push(orderBy(options.orderByField, options.orderDirection || 'desc'));
+    }
+    if (options.startAfterDoc) {
+      constraints.push(startAfter(options.startAfterDoc));
+    }
+    if (options.limit && options.limit > 0) {
+      constraints.push(limit(options.limit));
+    }
+    if (constraints.length > 0) {
+      q = query(q, ...constraints);
+    }
+  }
+
+  return onSnapshot(q, (snapshot: any) => {
+    callback(snapshot.docs.map((doc: any) => doc.data() as T));
+  }, (error: any) => {
     handleFirestoreError(error, OperationType.LIST, collectionName);
   });
 }
+

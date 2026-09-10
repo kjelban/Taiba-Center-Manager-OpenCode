@@ -16,6 +16,11 @@ import {
   normalizeCartStockItems,
   roundMoney,
   generateSaleRequestFingerprint,
+  ValidatedQueryOptions,
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
+  encodeQueryCursor,
+  validateQueryParameters,
 } from './server-auth';
 
 declare global {
@@ -287,6 +292,146 @@ export async function firestoreFindActiveAttendance(employeeId: string): Promise
     return tB - tA;
   });
   return activeDocs[0];
+}
+
+// ---- Firestore Bounded & Paginated Query Engine (AUDIT-007) ----
+
+export interface QueryCollectionResult<T = any> {
+  items: T[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  totalReturned: number;
+}
+
+export async function firestoreQueryCollection<T = any>(
+  options: ValidatedQueryOptions
+): Promise<QueryCollectionResult<T>> {
+  const token = await getGoogleAccessToken();
+  const baseUrl = getFirestoreBaseUrl();
+  const dbPath = getFirestoreDbPath();
+
+  const structuredQuery: any = {
+    from: [{ collectionId: options.collection }],
+    limit: options.limit + 1, // Fetch 1 extra to accurately detect hasMore
+  };
+
+  // 1. Where filters
+  const filters: any[] = [];
+
+  if (options.dateField) {
+    if (options.dateFrom) {
+      filters.push({
+        fieldFilter: {
+          field: { fieldPath: options.dateField },
+          op: "GREATER_THAN_OR_EQUAL",
+          value: jsToFirestoreValue(options.dateFrom),
+        }
+      });
+    }
+    if (options.dateTo) {
+      filters.push({
+        fieldFilter: {
+          field: { fieldPath: options.dateField },
+          op: "LESS_THAN_OR_EQUAL",
+          value: jsToFirestoreValue(options.dateTo),
+        }
+      });
+    }
+  }
+
+  if (options.filterField && options.filterValue !== undefined) {
+    filters.push({
+      fieldFilter: {
+        field: { fieldPath: options.filterField },
+        op: "EQUAL",
+        value: jsToFirestoreValue(options.filterValue),
+      }
+    });
+  }
+
+  if (filters.length === 1) {
+    structuredQuery.where = filters[0];
+  } else if (filters.length > 1) {
+    structuredQuery.where = {
+      compositeFilter: {
+        op: "AND",
+        filters,
+      }
+    };
+  }
+
+  // 2. Order by
+  const dirStr = options.orderDirection === "ASC" ? "ASCENDING" : "DESCENDING";
+  structuredQuery.orderBy = [
+    {
+      field: { fieldPath: options.orderByField },
+      direction: dirStr,
+    }
+  ];
+
+  if (options.orderByField !== '__name__' && options.orderByField !== 'id') {
+    structuredQuery.orderBy.push({
+      field: { fieldPath: '__name__' },
+      direction: dirStr,
+    });
+  }
+
+  // 3. Cursor (startAfter)
+  if (options.cursor) {
+    const cursorValues: any[] = [
+      jsToFirestoreValue(options.cursor.primary),
+    ];
+    if (options.orderByField !== '__name__' && options.orderByField !== 'id') {
+      cursorValues.push({
+        referenceValue: `${dbPath}/documents/${options.collection}/${options.cursor.id}`
+      });
+    }
+    structuredQuery.startAt = {
+      values: cursorValues,
+      before: false,
+    };
+  }
+
+  const resp = await fetch(`${baseUrl}/documents:runQuery`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ structuredQuery }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`Firestore runQuery failed: ${resp.status} ${errText}`);
+  }
+
+  const rawResults = (await resp.json()) as any[];
+  const docs: any[] = [];
+
+  for (const item of rawResults) {
+    if (item.document && item.document.fields) {
+      const doc: Record<string, any> = { id: item.document.name.split("/").pop() };
+      for (const [k, v] of Object.entries(item.document.fields)) {
+        doc[k] = firestoreValueToJs(v as any);
+      }
+      docs.push(doc);
+    }
+  }
+
+  const hasMore = docs.length > options.limit;
+  const items = hasMore ? docs.slice(0, options.limit) : docs;
+
+  let nextCursor: string | null = null;
+  if (hasMore && items.length > 0) {
+    const lastItem = items[items.length - 1];
+    const primaryVal = lastItem[options.orderByField] ?? null;
+    nextCursor = encodeQueryCursor(primaryVal, lastItem.id);
+  }
+
+  return {
+    items: items as T[],
+    nextCursor,
+    hasMore,
+    totalReturned: items.length,
+  };
 }
 
 // ---- Firestore Transaction Engine (Optimistic Concurrency Control) ----
@@ -2444,6 +2589,59 @@ ${JSON.stringify(summary, null, 2)}
       }
       const doc = await firestoreGetDocument(docPath);
       res.json(doc);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- Bounded & Paginated Collection Query Endpoint (AUDIT-007) ----
+
+  app.post("/api/query", requireFirebaseAuth, async (req, res) => {
+    try {
+      const validation = validateQueryParameters(req.body);
+      if (validation.error || !validation.options) {
+        return res.status(400).json({ error: validation.error });
+      }
+
+      const { collection } = validation.options;
+
+      // Enforce read permissions matching firestore.rules
+      const perms: string[] = req.employee?.permissions || [];
+      const isAdmin = perms.includes('employees') || perms.includes('settings');
+
+      if (collection === 'audit_logs' || collection === 'metadata') {
+        if (!isAdmin) {
+          return res.status(403).json({ error: "Access denied: admin permission required" });
+        }
+      } else if (collection === 'expenses') {
+        if (!perms.includes('expenses') && !isAdmin) {
+          return res.status(403).json({ error: "Access denied: expenses permission required" });
+        }
+      }
+
+      const result = await firestoreQueryCollection(validation.options);
+      res.json({ ok: true, collection, ...result, limit: validation.options.limit });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/audit-logs", requireFirebaseAuth, requireAdmin, async (req, res) => {
+    try {
+      const limitParam = req.query.limit ? parseInt(req.query.limit as string, 10) : DEFAULT_PAGE_SIZE;
+      const cursorParam = req.query.cursor as string | undefined;
+      const validation = validateQueryParameters({
+        collection: 'audit_logs',
+        limit: limitParam,
+        cursor: cursorParam,
+        orderByField: 'timestamp',
+        orderDirection: 'DESC',
+      });
+      if (validation.error || !validation.options) {
+        return res.status(400).json({ error: validation.error });
+      }
+      const result = await firestoreQueryCollection(validation.options);
+      res.json({ ok: true, ...result });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

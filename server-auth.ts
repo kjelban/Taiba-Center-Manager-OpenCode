@@ -241,3 +241,177 @@ export function validateProxyPayload(collection: string, id: string, data: any):
   }
   return null; // valid
 }
+
+// ── Query / Pagination Validation (AUDIT-007) ──
+
+export const DEFAULT_PAGE_SIZE = 50;
+export const MAX_PAGE_SIZE = 100;
+
+export const ALLOWED_SORT_FIELDS: Record<string, string[]> = {
+  sales: ['date', 'totalAmount', 'createdAt', 'id'],
+  expenses: ['date', 'amount', 'id'],
+  attendance: ['checkInTime', 'checkOutTime', 'date', 'id'],
+  audit_logs: ['timestamp', 'id'],
+  products: ['name', 'sellingPrice', 'stock', 'id', 'category'],
+  customers: ['name', 'totalPurchases', 'totalDebt', 'id'],
+  suppliers: ['name', 'id'],
+  categories: ['id'],
+  seasons: ['id'],
+  metadata: ['id'],
+};
+
+export const ALLOWED_DATE_FIELDS: Record<string, string[]> = {
+  sales: ['date', 'createdAt'],
+  expenses: ['date'],
+  attendance: ['checkInTime', 'checkOutTime', 'date'],
+  audit_logs: ['timestamp'],
+};
+
+export interface ValidatedQueryOptions {
+  collection: string;
+  limit: number;
+  cursor?: { primary: any; id: string };
+  rawCursor?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  dateField?: string;
+  orderByField: string;
+  orderDirection: 'ASC' | 'DESC';
+  filterField?: string;
+  filterValue?: any;
+}
+
+export function encodeQueryCursor(primaryValue: any, docId: string): string {
+  const payload = JSON.stringify({ v: primaryValue, id: docId });
+  return Buffer.from(payload, 'utf8').toString('base64url');
+}
+
+export function decodeQueryCursor(cursorStr: string): { primary: any; id: string } | null {
+  try {
+    const raw = Buffer.from(cursorStr, 'base64url').toString('utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (parsed.v === undefined || typeof parsed.id !== 'string' || !isValidDocumentId(parsed.id)) {
+      return null;
+    }
+    return { primary: parsed.v, id: parsed.id };
+  } catch {
+    return null;
+  }
+}
+
+export function validateQueryParameters(params: any): { error?: string; options?: ValidatedQueryOptions } {
+  if (!params || typeof params !== 'object') {
+    return { error: 'Query parameters must be a valid JSON object' };
+  }
+
+  const { collection } = params;
+  if (!collection || typeof collection !== 'string' || !isValidCollection(collection)) {
+    return { error: `Invalid or unallowlisted collection: ${collection}` };
+  }
+
+  // Limit handling
+  let limit = DEFAULT_PAGE_SIZE;
+  if (params.limit !== undefined && params.limit !== null) {
+    const num = Number(params.limit);
+    if (!Number.isFinite(num) || !Number.isInteger(num) || num <= 0) {
+      return { error: 'Limit must be a positive integer' };
+    }
+    limit = Math.min(num, MAX_PAGE_SIZE);
+  }
+
+  // Order By Field
+  const allowedSorts = ALLOWED_SORT_FIELDS[collection] || ['id'];
+  let orderByField = allowedSorts[0];
+  if (params.orderByField !== undefined && params.orderByField !== null) {
+    if (typeof params.orderByField !== 'string' || !allowedSorts.includes(params.orderByField)) {
+      return { error: `Invalid orderByField for collection '${collection}'. Allowed fields: ${allowedSorts.join(', ')}` };
+    }
+    orderByField = params.orderByField;
+  }
+
+  // Order Direction
+  let orderDirection: 'ASC' | 'DESC' = 'DESC';
+  if (params.orderDirection !== undefined && params.orderDirection !== null) {
+    const dir = String(params.orderDirection).toUpperCase();
+    if (dir !== 'ASC' && dir !== 'DESC') {
+      return { error: "orderDirection must be either 'ASC' or 'DESC'" };
+    }
+    orderDirection = dir;
+  }
+
+  // Date Field and Range
+  let dateField: string | undefined;
+  let dateFrom: string | undefined;
+  let dateTo: string | undefined;
+
+  if (params.dateFrom || params.dateTo || params.dateField) {
+    const allowedDates = ALLOWED_DATE_FIELDS[collection];
+    if (!allowedDates) {
+      return { error: `Collection '${collection}' does not support date filtering` };
+    }
+    dateField = params.dateField ? String(params.dateField) : allowedDates[0];
+    if (!allowedDates.includes(dateField)) {
+      return { error: `Invalid dateField for collection '${collection}'. Allowed date fields: ${allowedDates.join(', ')}` };
+    }
+
+    if (params.dateFrom) {
+      if (typeof params.dateFrom !== 'string' || isNaN(Date.parse(params.dateFrom))) {
+        return { error: `Invalid dateFrom format: must be a parseable ISO date string` };
+      }
+      dateFrom = params.dateFrom;
+    }
+
+    if (params.dateTo) {
+      if (typeof params.dateTo !== 'string' || isNaN(Date.parse(params.dateTo))) {
+        return { error: `Invalid dateTo format: must be a parseable ISO date string` };
+      }
+      dateTo = params.dateTo;
+    }
+
+    if (dateFrom && dateTo && Date.parse(dateFrom) > Date.parse(dateTo)) {
+      return { error: `dateFrom (${dateFrom}) cannot be after dateTo (${dateTo})` };
+    }
+  }
+
+  // Cursor handling
+  let cursor: { primary: any; id: string } | undefined;
+  if (params.cursor !== undefined && params.cursor !== null && params.cursor !== '') {
+    if (typeof params.cursor !== 'string') {
+      return { error: 'Cursor must be a string' };
+    }
+    const decoded = decodeQueryCursor(params.cursor);
+    if (!decoded) {
+      return { error: 'Invalid or malformed pagination cursor' };
+    }
+    cursor = decoded;
+  }
+
+  // Filter Field (optional equality filter e.g. employeeId, isPaid)
+  let filterField: string | undefined;
+  let filterValue: any = undefined;
+  if (params.filterField) {
+    if (typeof params.filterField !== 'string' || !/^[a-zA-Z0-9_]{1,32}$/.test(params.filterField)) {
+      return { error: 'Invalid filterField format' };
+    }
+    filterField = params.filterField;
+    filterValue = params.filterValue;
+  }
+
+  return {
+    options: {
+      collection,
+      limit,
+      cursor,
+      rawCursor: params.cursor || undefined,
+      dateField,
+      dateFrom,
+      dateTo,
+      orderByField,
+      orderDirection,
+      filterField,
+      filterValue,
+    }
+  };
+}
+
