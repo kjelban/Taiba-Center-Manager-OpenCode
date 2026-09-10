@@ -29,6 +29,9 @@ export const DataService = {
   subscribeToSales: SaleService.subscribeToSales,
   subscribeToRecentSales: SaleService.subscribeToRecentSales,
   getSalesByDateRange: SaleService.getSalesByDateRange,
+  getTodaySales: SaleService.getTodaySales,
+  getSaleById: SaleService.getSaleById,
+  getSalesByCustomer: SaleService.getSalesByCustomer,
   createSale: SaleService.createSale,
   updateSale: SaleService.updateSale,
   deleteSale: SaleService.deleteSale,
@@ -49,6 +52,7 @@ export const DataService = {
   subscribeToExpenses: ExpenseService.subscribeToExpenses,
   subscribeToRecentExpenses: ExpenseService.subscribeToRecentExpenses,
   getExpensesByDateRange: ExpenseService.getExpensesByDateRange,
+  getExpensesTotal: ExpenseService.getExpensesTotal,
   addExpense: ExpenseService.addExpense,
   deleteExpense: ExpenseService.deleteExpense,
 

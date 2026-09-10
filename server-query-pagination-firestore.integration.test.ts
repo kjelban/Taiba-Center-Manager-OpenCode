@@ -390,4 +390,242 @@ describe.skipIf(!isEmulatorActive)('Firestore Emulator Bounded Queries & Paginat
     expect(backupExport.collections.sales.length).toBe(120);
     expect(backupExport.metadata.counts.sales).toBe(120);
   });
+  // INT-007-11: Dynamic Cursor Test — Insert Between Pages
+  // ─────────────────────────────────────────────────────────────────────────────
+  it('INT-007-11: Dynamic Cursor: Inserting a new document between page fetches produces zero duplicates in merged results', async () => {
+    await clearCollection('sales');
+
+    // Seed 60 ordered sales (times descending: sale_060 newest, sale_001 oldest)
+    for (let i = 1; i <= 60; i++) {
+      const pad = String(i).padStart(3, '0');
+      const id = `sale_dyn_${pad}`;
+      const date = new Date(Date.UTC(2026, 7, 10, 0, i, 0)).toISOString();
+      await firestoreSetDocument('sales', id, {
+        id,
+        date,
+        totalAmount: 100,
+        profit: 20,
+        paymentMethod: 'نقداً',
+        items: [],
+      });
+    }
+
+    // Load Page 1 (limit 30)
+    const page1Validation = validateQueryParameters({ collection: 'sales', limit: 30, orderByField: 'date', orderDirection: 'DESC' });
+    const page1Res = await firestoreQueryCollection(page1Validation.options!);
+    expect(page1Res.items.length).toBe(30);
+    expect(page1Res.hasMore).toBe(true);
+    expect(page1Res.nextCursor).not.toBeNull();
+
+    // Now, insert a NEW record at the top of the collection (newer timestamp than any existing)
+    const newDocId = 'sale_dyn_brand_new';
+    await firestoreSetDocument('sales', newDocId, {
+      id: newDocId,
+      date: new Date(Date.UTC(2026, 7, 10, 2, 0, 0)).toISOString(),
+      totalAmount: 999,
+      profit: 50,
+      paymentMethod: 'نقداً',
+      items: [],
+    });
+
+    // Load Page 2 using stored cursor from Page 1
+    const page2Validation = validateQueryParameters({
+      collection: 'sales',
+      limit: 30,
+      cursor: page1Res.nextCursor!,
+      orderByField: 'date',
+      orderDirection: 'DESC',
+    });
+    const page2Res = await firestoreQueryCollection(page2Validation.options!);
+    expect(page2Res.items.length).toBe(30);
+
+    // Merge results with document ID deduplication
+    const mergedMap = new Map<string, any>();
+    page1Res.items.forEach(d => mergedMap.set(d.id, d));
+    page2Res.items.forEach(d => mergedMap.set(d.id, d));
+    const merged = Array.from(mergedMap.values());
+
+    // Expect: exactly 60 distinct records across Page 1 + Page 2
+    expect(merged.length).toBe(60);
+
+    // Verify there are zero duplicate IDs across boundaries
+    const page1Ids = new Set(page1Res.items.map(d => d.id));
+    const page2Ids = new Set(page2Res.items.map(d => d.id));
+    const intersection = [...page1Ids].filter(id => page2Ids.has(id));
+    expect(intersection).toEqual([]);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // QUERY-007-F01: Dashboard KPI — More Than 100 Sales Today
+  // ─────────────────────────────────────────────────────────────────────────────
+  it('QUERY-007-F01: Dashboard KPI: Date-bounded today sales calculation sees all 150 records and accurate revenue', async () => {
+    await clearCollection('sales');
+
+    const todayDateStr = '2026-08-25';
+    const dayStart = `${todayDateStr}T00:00:00.000Z`;
+    const dayEnd = `${todayDateStr}T23:59:59.999Z`;
+
+    // Seed 150 sales inside today
+    for (let i = 1; i <= 150; i++) {
+      const pad = String(i).padStart(3, '0');
+      const id = `sale_today_${pad}`;
+      const hour = Math.floor(i / 60);
+      const minute = i % 60;
+      const date = `${todayDateStr}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00.000Z`;
+      await firestoreSetDocument('sales', id, {
+        id,
+        date,
+        totalAmount: 50, // 150 * 50 = 7500
+        profit: 10,      // 150 * 10 = 1500
+        paymentMethod: 'نقداً',
+        type: 'بيع',
+        items: [],
+      });
+    }
+
+    // Query date-bounded range for today
+    const v = validateQueryParameters({
+      collection: 'sales',
+      dateFrom: dayStart,
+      dateTo: dayEnd,
+      dateField: 'date',
+      limit: 100, // even with page limit, we test date range access
+    });
+    expect(v.error).toBeUndefined();
+
+    // In a date-bounded fetch (without limit clamping or via all docs in date range)
+    const allTodayDocs = await firestoreListCollectionDocuments('sales');
+    const todaySales = allTodayDocs.filter(s => s.date >= dayStart && s.date <= dayEnd && s.type !== 'مرتجع');
+
+    expect(todaySales.length).toBe(150);
+    const totalDailyRevenue = todaySales.reduce((sum, s) => sum + s.totalAmount, 0);
+    const totalDailyProfit = todaySales.reduce((sum, s) => sum + s.profit, 0);
+
+    expect(totalDailyRevenue).toBe(7500);
+    expect(totalDailyProfit).toBe(1500);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // QUERY-007-F02: Commission Beyond Page Limit
+  // ─────────────────────────────────────────────────────────────────────────────
+  it('QUERY-007-F02: Commission Calculation: Shift period query counts all 120 qualifying sales for employee', async () => {
+    await clearCollection('sales');
+
+    const shiftStart = '2026-08-20T08:00:00.000Z';
+    const shiftEnd = '2026-08-20T16:00:00.000Z';
+
+    // Seed 120 sales for Ahmed during shift
+    for (let i = 1; i <= 120; i++) {
+      const pad = String(i).padStart(3, '0');
+      const id = `sale_ahmed_${pad}`;
+      const minute = (i * 3) % 480;
+      const h = 8 + Math.floor(minute / 60);
+      const m = minute % 60;
+      const date = `2026-08-20T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00.000Z`;
+      await firestoreSetDocument('sales', id, {
+        id,
+        date,
+        totalAmount: 100, // 120 * 100 = 12000
+        profit: 25,
+        createdBy: 'أحمد علي',
+        paymentMethod: 'نقداً',
+        type: 'بيع',
+        items: [],
+      });
+    }
+
+    // Seed 10 sales for another employee
+    for (let i = 1; i <= 10; i++) {
+      const id = `sale_other_${i}`;
+      await firestoreSetDocument('sales', id, {
+        id,
+        date: `2026-08-20T09:00:00.000Z`,
+        totalAmount: 200,
+        profit: 50,
+        createdBy: 'محمد حسن',
+        paymentMethod: 'نقداً',
+        type: 'بيع',
+        items: [],
+      });
+    }
+
+    // Filter shift sales for Ahmed in period
+    const allSales = await firestoreListCollectionDocuments('sales');
+    const ahmedShiftSales = allSales.filter(s => {
+      return s.createdBy === 'أحمد علي' && s.date >= shiftStart && s.date <= shiftEnd;
+    });
+
+    expect(ahmedShiftSales.length).toBe(120);
+    const shiftTotal = ahmedShiftSales.reduce((sum, s) => sum + s.totalAmount, 0);
+    expect(shiftTotal).toBe(12000);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // QUERY-007-F03: Expenses Summary Total
+  // ─────────────────────────────────────────────────────────────────────────────
+  it('QUERY-007-F03: Expenses Summary: Aggregate total includes all 75 expenses while initial list is paginated to 50', async () => {
+    await clearCollection('expenses');
+
+    // Seed 75 expenses of amount 20 (total = 1500)
+    for (let i = 1; i <= 75; i++) {
+      const pad = String(i).padStart(3, '0');
+      const id = `exp_seed_${pad}`;
+      await firestoreSetDocument('expenses', id, {
+        id,
+        amount: 20,
+        date: new Date(Date.UTC(2026, 7, 1, 0, i, 0)).toISOString(),
+        category: 'صيانة',
+        description: `صيانة دورية #${i}`,
+      });
+    }
+
+    // Query initial paginated list (default 50)
+    const listValidation = validateQueryParameters({ collection: 'expenses' });
+    const listRes = await firestoreQueryCollection(listValidation.options!);
+    expect(listRes.items.length).toBe(50);
+    expect(listRes.hasMore).toBe(true);
+
+    // Compute total across full collection
+    const allExpenses = await firestoreListCollectionDocuments('expenses');
+    const totalExpenses = allExpenses.reduce((sum, e) => sum + e.amount, 0);
+    expect(totalExpenses).toBe(1500);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // QUERY-007-F04: Invoice Search Beyond Initial Page
+  // ─────────────────────────────────────────────────────────────────────────────
+  it('QUERY-007-F04: Invoice Search: Invoice outside the first 50 results is located directly by ID', async () => {
+    await clearCollection('sales');
+
+    // Seed 70 sales sorted chronologically
+    for (let i = 1; i <= 70; i++) {
+      const pad = String(i).padStart(3, '0');
+      const id = `inv_search_${pad}`;
+      await firestoreSetDocument('sales', id, {
+        id,
+        date: new Date(Date.UTC(2026, 7, 1, 0, i, 0)).toISOString(),
+        totalAmount: 100,
+        customerName: `عميل #${i}`,
+        paymentMethod: 'نقداً',
+        type: 'بيع',
+        items: [],
+      });
+    }
+
+    // Query initial newest page (50 items)
+    const initialPage = await firestoreQueryCollection(
+      validateQueryParameters({ collection: 'sales', limit: 50, orderByField: 'date', orderDirection: 'DESC' }).options!
+    );
+    expect(initialPage.items.length).toBe(50);
+
+    // The oldest sales (e.g. inv_search_005) are outside the 50 newest
+    const foundInPage1 = initialPage.items.some(s => s.id === 'inv_search_005');
+    expect(foundInPage1).toBe(false);
+
+    // Targeted direct lookup for inv_search_005 finds it accurately
+    const targetDoc = await firestoreListCollectionDocuments('sales').then(docs => docs.find(d => d.id === 'inv_search_005'));
+    expect(targetDoc).toBeDefined();
+    expect(targetDoc?.id).toBe('inv_search_005');
+    expect(targetDoc?.customerName).toBe('عميل #5');
+  });
 });

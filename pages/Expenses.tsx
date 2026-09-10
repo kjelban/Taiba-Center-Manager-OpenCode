@@ -14,11 +14,28 @@ const Expenses: React.FC = () => {
   });
 
   const [pageSize, setPageSize] = useState(50);
+  const [totalExpenses, setTotalExpenses] = useState<number>(0);
+
+  const refreshTotalExpenses = async () => {
+    try {
+      const total = await DataService.getExpensesTotal();
+      setTotalExpenses(total);
+    } catch (err) {
+      console.warn('Failed to fetch full expenses total:', err);
+    }
+  };
+
+  useEffect(() => {
+    refreshTotalExpenses();
+  }, []);
 
   useEffect(() => {
     const unsub = DataService.subscribeToExpenses(data => {
         data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         setExpenses(data);
+        if (data.length < pageSize) {
+          setTotalExpenses(data.reduce((sum, e) => sum + e.amount, 0));
+        }
     }, { limit: pageSize, orderByField: 'date', orderDirection: 'desc' });
     return () => unsub();
   }, [pageSize]);
@@ -26,6 +43,7 @@ const Expenses: React.FC = () => {
   const handleDelete = async (id: string) => {
     if (window.confirm('هل أنت متأكد من حذف هذا المصروف؟')) {
       await DataService.deleteExpense(id);
+      await refreshTotalExpenses();
     }
   };
 
@@ -40,6 +58,7 @@ const Expenses: React.FC = () => {
     };
     
     await DataService.addExpense(newExpense);
+    await refreshTotalExpenses();
     setIsModalOpen(false);
     setFormData({
       category: 'مصروفات عامة',
@@ -48,8 +67,6 @@ const Expenses: React.FC = () => {
       date: new Date().toISOString().split('T')[0]
     });
   };
-
-  const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
 
   return (
     <div className="p-6 h-[calc(100vh-64px)] overflow-hidden flex flex-col">

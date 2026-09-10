@@ -12,6 +12,7 @@ interface InvoicesProps {
 
 const Invoices: React.FC<InvoicesProps> = ({ currentUser, onEditInvoice }) => {
   const [sales, setSales] = useState<Sale[]>([]);
+  const [searchResults, setSearchResults] = useState<Sale[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
   const [filterType, setFilterType] = useState<'ALL' | 'DEBT' | 'PAID_DEBT'>('ALL');
@@ -27,6 +28,29 @@ const Invoices: React.FC<InvoicesProps> = ({ currentUser, onEditInvoice }) => {
     }, { limit: pageSize, orderByField: 'date', orderDirection: 'desc' });
     return () => unsub();
   }, [pageSize]);
+
+  // Targeted server lookup when searching for an invoice outside the initial 50 loaded records
+  useEffect(() => {
+    const term = searchTerm.trim();
+    if (!term) {
+      setSearchResults([]);
+      return;
+    }
+
+    const inLoaded = sales.some(s => s.id === term || s.id.includes(term));
+    if (inLoaded) return;
+
+    let active = true;
+    DataService.getSaleById(term).then(found => {
+      if (active && found) {
+        setSearchResults([found]);
+      }
+    }).catch(() => {});
+
+    return () => {
+      active = false;
+    };
+  }, [searchTerm, sales]);
 
   const handleOpenDetails = (sale: Sale) => {
     setSelectedSale(sale);
@@ -58,8 +82,15 @@ const Invoices: React.FC<InvoicesProps> = ({ currentUser, onEditInvoice }) => {
     }
   };
 
+  // Merge loaded sales and targeted search results with deterministic ID deduplication
+  const allSales = React.useMemo(() => {
+    const map = new Map<string, Sale>();
+    sales.forEach(s => map.set(s.id, s));
+    searchResults.forEach(s => map.set(s.id, s));
+    return Array.from(map.values()).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [sales, searchResults]);
 
-  const filteredSales = sales.filter(s => {
+  const filteredSales = allSales.filter(s => {
     const matchesSearch = s.id.includes(searchTerm) || s.customerName?.includes(searchTerm);
     if (!matchesSearch) return false;
 

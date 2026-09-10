@@ -51,17 +51,36 @@ const Employees: React.FC = () => {
         data.sort((a, b) => new Date(b.checkInTime).getTime() - new Date(a.checkInTime).getTime());
         setAttendanceRecords(data);
     }, { limit: 100, orderByField: 'checkInTime', orderDirection: 'desc' });
-    const unsubSales = DataService.subscribeToSales(data => {
-        data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-        setSales(data);
-    }, { limit: 100, orderByField: 'date', orderDirection: 'desc' });
 
     return () => {
         unsubEmployees();
         unsubAttendance();
-        unsubSales();
     };
   }, []);
+
+  // Fetch complete sales dataset for the selected worklog period to ensure accurate commission/shift calculations
+  useEffect(() => {
+    let active = true;
+    const range = getDateRange();
+    const fromIso = range
+      ? range.from.toISOString()
+      : (attendanceRecords.length > 0 ? attendanceRecords[attendanceRecords.length - 1]?.checkInTime : new Date(Date.now() - 30 * 86400000).toISOString());
+    const toIso = range ? range.to.toISOString() : new Date().toISOString();
+
+    DataService.getSalesByDateRange(fromIso, toIso)
+      .then(periodSales => {
+        if (!active) return;
+        periodSales.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+        setSales(periodSales);
+      })
+      .catch(err => {
+        console.warn("Failed to fetch period sales for employee commissions:", err);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [worklogFilter, customFrom, customTo, attendanceRecords.length]);
 
   const handleDelete = async (id: string) => {
     if (window.confirm('هل أنت متأكد من حذف هذا المستخدم؟')) {

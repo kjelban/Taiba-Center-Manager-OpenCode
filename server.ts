@@ -11,6 +11,8 @@ import {
   isValidDocumentId,
   WRITE_PERMISSIONS,
   hasWritePermission,
+  READ_PERMISSIONS,
+  hasReadPermission,
   validateProxyPayload,
   validateSalePayload,
   normalizeCartStockItems,
@@ -2605,18 +2607,9 @@ ${JSON.stringify(summary, null, 2)}
 
       const { collection } = validation.options;
 
-      // Enforce read permissions matching firestore.rules
-      const perms: string[] = req.employee?.permissions || [];
-      const isAdmin = perms.includes('employees') || perms.includes('settings');
-
-      if (collection === 'audit_logs' || collection === 'metadata') {
-        if (!isAdmin) {
-          return res.status(403).json({ error: "Access denied: admin permission required" });
-        }
-      } else if (collection === 'expenses') {
-        if (!perms.includes('expenses') && !isAdmin) {
-          return res.status(403).json({ error: "Access denied: expenses permission required" });
-        }
+      // Enforce read permissions matching RBAC policy & firestore.rules
+      if (!hasReadPermission(req.employee, collection)) {
+        return res.status(403).json({ error: `Access denied: missing permission to query collection "${collection}"` });
       }
 
       const result = await firestoreQueryCollection(validation.options);

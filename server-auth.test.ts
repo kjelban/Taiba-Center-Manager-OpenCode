@@ -13,6 +13,9 @@ import {
   decodeQueryCursor,
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
+  hasReadPermission,
+  READ_PERMISSIONS,
+  PER_COLLECTION_QUERY_POLICY,
 } from './server-auth';
 
 // ── isValidCollection ──
@@ -611,6 +614,53 @@ describe('AUDIT-007: Query Validation & Pagination Unit Tests', () => {
     expect(validateQueryParameters({ collection: 'sales', dateFrom: 'not-a-date' }).error).toContain('Invalid dateFrom format');
     expect(validateQueryParameters({ collection: 'sales', dateTo: 'not-a-date' }).error).toContain('Invalid dateTo format');
     expect(validateQueryParameters({ collection: 'sales', dateFrom: '2026-12-31', dateTo: '2026-01-01' }).error).toContain('cannot be after');
+  });
+
+  it('QUERY-007-S01: Cashier cannot query audit_logs or metadata (admin only)', () => {
+    const cashier = { id: 'c1', role: 'كاشير', permissions: ['pos'] };
+    expect(hasReadPermission(cashier, 'audit_logs')).toBe(false);
+    expect(hasReadPermission(cashier, 'metadata')).toBe(false);
+
+    const admin = { id: 'a1', role: 'مدير', permissions: ['settings', 'employees'] };
+    expect(hasReadPermission(admin, 'audit_logs')).toBe(true);
+    expect(hasReadPermission(admin, 'metadata')).toBe(true);
+  });
+
+  it('QUERY-007-S02: Unauthorized or missing employee receives false for all queries', () => {
+    expect(hasReadPermission(null, 'sales')).toBe(false);
+    expect(hasReadPermission(undefined, 'sales')).toBe(false);
+    expect(hasReadPermission({}, 'sales')).toBe(false);
+    expect(hasReadPermission({ permissions: 'not-an-array' }, 'sales')).toBe(false);
+  });
+
+  it('QUERY-007-S03: Role cannot query collections outside assigned permission', () => {
+    const cashier = { id: 'c1', role: 'كاشير', permissions: ['pos'] };
+    // Cashier can read sales and customers (needed for POS)
+    expect(hasReadPermission(cashier, 'sales')).toBe(true);
+    expect(hasReadPermission(cashier, 'customers')).toBe(true);
+    // Cashier cannot read expenses without 'expenses' permission
+    expect(hasReadPermission(cashier, 'expenses')).toBe(false);
+
+    const inventoryStaff = { id: 'inv1', role: 'مخزن', permissions: ['inventory'] };
+    expect(hasReadPermission(inventoryStaff, 'products')).toBe(true);
+    expect(hasReadPermission(inventoryStaff, 'sales')).toBe(false);
+    expect(hasReadPermission(inventoryStaff, 'expenses')).toBe(false);
+    expect(hasReadPermission(inventoryStaff, 'audit_logs')).toBe(false);
+  });
+
+  it('QUERY-007-S04: Collection-specific invalid sort or filter field rejected with 400', () => {
+    // employees does not allow totalAmount sort
+    const resSort = validateQueryParameters({ collection: 'employees', orderByField: 'totalAmount' });
+    expect(resSort.error).toContain("Invalid orderByField for collection 'employees'");
+
+    // customers does not allow barcode filter
+    const resFilter = validateQueryParameters({ collection: 'customers', filterField: 'barcode', filterValue: '123' });
+    expect(resFilter.error).toContain("Invalid filterField for collection 'customers'");
+
+    // products allows category filter and name sort
+    const validProduct = validateQueryParameters({ collection: 'products', orderByField: 'name', filterField: 'category', filterValue: 'ملابس' });
+    expect(validProduct.error).toBeUndefined();
+    expect(validProduct.options?.filterField).toBe('category');
   });
 });
 

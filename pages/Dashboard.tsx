@@ -27,17 +27,19 @@ const Dashboard: React.FC = () => {
   useEffect(() => {
     let currentSales: any[] = [];
     let currentProducts: any[] = [];
+    let todaySalesRecords: any[] = [];
 
     const updateDashboard = () => {
-      // Calculate Stats
-      const today = new Date().toISOString().split('T')[0];
-      const todaySales = currentSales
-        .filter(s => s.date.startsWith(today) && s.type !== 'مرتجع')
+      // Calculate Stats strictly from complete date-bounded today's dataset
+      const todaySales = todaySalesRecords
+        .filter(s => s.type !== 'مرتجع')
         .reduce((sum, s) => sum + s.totalAmount, 0);
 
       const lowStock = currentProducts.filter(p => p.stock <= p.minStockAlert).length;
 
-      const totalProfit = currentSales.reduce((sum, s) => sum + s.profit, 0);
+      const totalProfit = todaySalesRecords
+        .filter(s => s.type !== 'مرتجع')
+        .reduce((sum, s) => sum + (s.profit || 0), 0);
 
       setStats({
         dailySales: todaySales,
@@ -86,9 +88,22 @@ const Dashboard: React.FC = () => {
       setEmployeePerformance(sortedEmps);
     };
 
+    const fetchTodaySales = async () => {
+      try {
+        const fullTodaySales = await DataService.getTodaySales();
+        todaySalesRecords = fullTodaySales;
+        updateDashboard();
+      } catch (err) {
+        console.warn('Failed to fetch today sales for Dashboard:', err);
+      }
+    };
+
+    fetchTodaySales();
+
     const unsubSales = DataService.subscribeToSales(sales => {
         currentSales = sales;
         updateDashboard();
+        fetchTodaySales();
     }, { limit: 100, orderByField: 'date', orderDirection: 'desc' });
 
     const unsubProducts = DataService.subscribeToProducts(products => {

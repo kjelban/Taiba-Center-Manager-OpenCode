@@ -242,30 +242,110 @@ export function validateProxyPayload(collection: string, id: string, data: any):
   return null; // valid
 }
 
+// Server-side permission mapping (mirrors Firestore rules)
+// Maps collection name to the permission required for READ operations.
+export const READ_PERMISSIONS: Record<string, string> = {
+  products: 'any',
+  categories: 'any',
+  seasons: 'any',
+  suppliers: 'any',
+  customers: 'pos',
+  sales: 'pos',
+  attendance: 'any',
+  expenses: 'expenses',
+  employees: 'any',
+  metadata: 'admin',
+  audit_logs: 'admin',
+};
+
+export function hasReadPermission(employee: any, collection: string): boolean {
+  const required = READ_PERMISSIONS[collection];
+  if (!required) return false;
+  if (!employee || typeof employee !== 'object' || !Array.isArray(employee.permissions)) return false;
+  const perms: string[] = employee.permissions;
+  const isAdmin = perms.includes('employees') || perms.includes('settings') || employee.role === 'مدير' || employee.role === 'المدير العام';
+  if (isAdmin) return true;
+  if (required === 'any') return true;
+  if (required === 'admin') return false;
+  return perms.includes(required);
+}
+
 // ── Query / Pagination Validation (AUDIT-007) ──
 
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 100;
 
-export const ALLOWED_SORT_FIELDS: Record<string, string[]> = {
-  sales: ['date', 'totalAmount', 'createdAt', 'id'],
-  expenses: ['date', 'amount', 'id'],
-  attendance: ['checkInTime', 'checkOutTime', 'date', 'id'],
-  audit_logs: ['timestamp', 'id'],
-  products: ['name', 'sellingPrice', 'stock', 'id', 'category'],
-  customers: ['name', 'totalPurchases', 'totalDebt', 'id'],
-  suppliers: ['name', 'id'],
-  categories: ['id'],
-  seasons: ['id'],
-  metadata: ['id'],
+export interface CollectionQueryPolicy {
+  allowedSortFields: string[];
+  allowedDateFields: string[];
+  allowedFilterFields: string[];
+}
+
+export const PER_COLLECTION_QUERY_POLICY: Record<string, CollectionQueryPolicy> = {
+  sales: {
+    allowedSortFields: ['date', 'totalAmount', 'createdAt', 'id'],
+    allowedDateFields: ['date', 'createdAt'],
+    allowedFilterFields: ['customerId', 'createdBy', 'isPaid', 'paymentMethod', 'type'],
+  },
+  expenses: {
+    allowedSortFields: ['date', 'amount', 'id'],
+    allowedDateFields: ['date'],
+    allowedFilterFields: ['category'],
+  },
+  attendance: {
+    allowedSortFields: ['checkInTime', 'checkOutTime', 'date', 'id'],
+    allowedDateFields: ['checkInTime', 'checkOutTime', 'date'],
+    allowedFilterFields: ['employeeId', 'date'],
+  },
+  audit_logs: {
+    allowedSortFields: ['timestamp', 'id'],
+    allowedDateFields: ['timestamp'],
+    allowedFilterFields: ['action', 'performedBy'],
+  },
+  products: {
+    allowedSortFields: ['name', 'sellingPrice', 'stock', 'id', 'category'],
+    allowedDateFields: [],
+    allowedFilterFields: ['category', 'barcode'],
+  },
+  customers: {
+    allowedSortFields: ['name', 'totalPurchases', 'totalDebt', 'id'],
+    allowedDateFields: [],
+    allowedFilterFields: ['phone'],
+  },
+  employees: {
+    allowedSortFields: ['name', 'id'],
+    allowedDateFields: [],
+    allowedFilterFields: ['role', 'type'],
+  },
+  suppliers: {
+    allowedSortFields: ['name', 'id'],
+    allowedDateFields: [],
+    allowedFilterFields: [],
+  },
+  categories: {
+    allowedSortFields: ['id'],
+    allowedDateFields: [],
+    allowedFilterFields: [],
+  },
+  seasons: {
+    allowedSortFields: ['id'],
+    allowedDateFields: [],
+    allowedFilterFields: [],
+  },
+  metadata: {
+    allowedSortFields: ['id'],
+    allowedDateFields: [],
+    allowedFilterFields: [],
+  },
 };
 
-export const ALLOWED_DATE_FIELDS: Record<string, string[]> = {
-  sales: ['date', 'createdAt'],
-  expenses: ['date'],
-  attendance: ['checkInTime', 'checkOutTime', 'date'],
-  audit_logs: ['timestamp'],
-};
+export const ALLOWED_SORT_FIELDS: Record<string, string[]> = Object.fromEntries(
+  Object.entries(PER_COLLECTION_QUERY_POLICY).map(([k, v]) => [k, v.allowedSortFields])
+);
+
+export const ALLOWED_DATE_FIELDS: Record<string, string[]> = Object.fromEntries(
+  Object.entries(PER_COLLECTION_QUERY_POLICY).map(([k, v]) => [k, v.allowedDateFields])
+);
 
 export interface ValidatedQueryOptions {
   collection: string;
@@ -310,6 +390,12 @@ export function validateQueryParameters(params: any): { error?: string; options?
     return { error: `Invalid or unallowlisted collection: ${collection}` };
   }
 
+  const policy = PER_COLLECTION_QUERY_POLICY[collection] || {
+    allowedSortFields: ['id'],
+    allowedDateFields: [],
+    allowedFilterFields: [],
+  };
+
   // Limit handling
   let limit = DEFAULT_PAGE_SIZE;
   if (params.limit !== undefined && params.limit !== null) {
@@ -321,7 +407,7 @@ export function validateQueryParameters(params: any): { error?: string; options?
   }
 
   // Order By Field
-  const allowedSorts = ALLOWED_SORT_FIELDS[collection] || ['id'];
+  const allowedSorts = policy.allowedSortFields;
   let orderByField = allowedSorts[0];
   if (params.orderByField !== undefined && params.orderByField !== null) {
     if (typeof params.orderByField !== 'string' || !allowedSorts.includes(params.orderByField)) {
@@ -346,8 +432,8 @@ export function validateQueryParameters(params: any): { error?: string; options?
   let dateTo: string | undefined;
 
   if (params.dateFrom || params.dateTo || params.dateField) {
-    const allowedDates = ALLOWED_DATE_FIELDS[collection];
-    if (!allowedDates) {
+    const allowedDates = policy.allowedDateFields;
+    if (!allowedDates || allowedDates.length === 0) {
       return { error: `Collection '${collection}' does not support date filtering` };
     }
     dateField = params.dateField ? String(params.dateField) : allowedDates[0];
@@ -393,6 +479,10 @@ export function validateQueryParameters(params: any): { error?: string; options?
   if (params.filterField) {
     if (typeof params.filterField !== 'string' || !/^[a-zA-Z0-9_]{1,32}$/.test(params.filterField)) {
       return { error: 'Invalid filterField format' };
+    }
+    const allowedFilters = policy.allowedFilterFields;
+    if (!allowedFilters.includes(params.filterField)) {
+      return { error: `Invalid filterField for collection '${collection}'. Allowed filter fields: ${allowedFilters.join(', ')}` };
     }
     filterField = params.filterField;
     filterValue = params.filterValue;

@@ -43,6 +43,33 @@ export const SaleService = {
     });
   },
 
+  getTodaySales: async (): Promise<Sale[]> => {
+    const today = new Date().toISOString().split('T')[0];
+    const from = `${today}T00:00:00.000Z`;
+    const to = `${today}T23:59:59.999Z`;
+    return await SaleService.getSalesByDateRange(from, to);
+  },
+
+  getSaleById: async (id: string): Promise<Sale | null> => {
+    try {
+      const { doc, getDoc } = await import('firebase/firestore');
+      const { db } = await import('./firebase');
+      const docSnap = await getDoc(doc(db, COLLECTIONS.SALES, id));
+      if (!docSnap.exists()) return null;
+      return { id: docSnap.id, ...(docSnap.data() as any) } as Sale;
+    } catch {
+      return null;
+    }
+  },
+
+  getSalesByCustomer: async (customerId: string): Promise<Sale[]> => {
+    return await getAll<Sale>(COLLECTIONS.SALES, {
+      where: [{ field: 'customerId', op: '==', value: customerId }],
+      orderByField: 'date',
+      orderDirection: 'desc',
+    });
+  },
+
   createSale: async (sale: Sale): Promise<void> => {
     await post('/api/sales/create', { sale });
   },
