@@ -505,3 +505,40 @@ export function validateQueryParameters(params: any): { error?: string; options?
   };
 }
 
+// ── Content Security Policy Directives (AUDIT-010) ──
+
+export interface CspDirectives {
+  defaultSrc: string[];
+  scriptSrc: string[];
+  styleSrc: string[];
+  fontSrc: string[];
+  imgSrc: string[];
+  connectSrc: string[];
+  [key: string]: string[];
+}
+
+/**
+ * Generates Helmet Content-Security-Policy directives.
+ * In production mode, scriptSrc strictly enforces 'self' with NO 'unsafe-inline' or 'unsafe-eval'.
+ * In development mode, 'unsafe-inline' and 'unsafe-eval' are retained to support Vite HMR.
+ */
+export function getCspDirectives(isProduction: boolean): CspDirectives {
+  return {
+    defaultSrc: ["'self'"],
+    scriptSrc: isProduction
+      ? ["'self'"]
+      : ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+    styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+    fontSrc: ["'self'", "https://fonts.gstatic.com"],
+    imgSrc: ["'self'", "data:", "blob:"],
+    connectSrc: [
+      "'self'",
+      "https://*.firebaseio.com",
+      "https://*.googleapis.com",
+      "https://identitytoolkit.googleapis.com",
+      "https://securetoken.googleapis.com",
+      "https://firestore.googleapis.com",
+    ],
+  };
+}
+

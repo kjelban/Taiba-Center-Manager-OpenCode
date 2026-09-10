@@ -23,6 +23,7 @@ import {
   MAX_PAGE_SIZE,
   encodeQueryCursor,
   validateQueryParameters,
+  getCspDirectives,
 } from './server-auth';
 
 declare global {
@@ -1915,6 +1916,20 @@ export async function executeSaleTransaction(salePayload: any): Promise<SaleTran
   });
 }
 
+/**
+ * Helmet middleware configured with environment-specific CSP (AUDIT-010).
+ * In production: scriptSrc strictly allows 'self' only (no 'unsafe-inline' or 'unsafe-eval').
+ * In development: retains 'unsafe-inline' and 'unsafe-eval' to support Vite dev server and HMR.
+ */
+export function createHelmetMiddleware(isProduction = process.env.NODE_ENV === 'production') {
+  return helmet({
+    contentSecurityPolicy: {
+      directives: getCspDirectives(isProduction),
+    },
+    crossOriginEmbedderPolicy: false,
+  });
+}
+
 async function startServer() {
   // Execute startup check for uncompleted restore operations (AUDIT-012 Crash Safety)
   try {
@@ -1928,26 +1943,7 @@ async function startServer() {
 
   app.set('trust proxy', 1);
 
-  app.use(helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
-        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-        fontSrc: ["'self'", "https://fonts.gstatic.com"],
-        imgSrc: ["'self'", "data:", "blob:"],
-        connectSrc: [
-          "'self'",
-          "https://*.firebaseio.com",
-          "https://*.googleapis.com",
-          "https://identitytoolkit.googleapis.com",
-          "https://securetoken.googleapis.com",
-          "https://firestore.googleapis.com",
-        ],
-      },
-    },
-    crossOriginEmbedderPolicy: false,
-  }));
+  app.use(createHelmetMiddleware(process.env.NODE_ENV === 'production'));
 
   const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
