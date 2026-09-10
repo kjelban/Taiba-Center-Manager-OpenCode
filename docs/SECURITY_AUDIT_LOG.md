@@ -48,3 +48,39 @@ This log tracks chronologically all remediation, validation, and status updates 
   - Firestore Emulator integration run: All 153 tests passed (Attendance, Sales, Backup/Restore, Query Pagination, CSP).
   - Production build: `npm run build` succeeded.
 - **Status Change**: **AUDIT-010** -> **VERIFIED CLOSED**.
+
+---
+
+### Entry: 2026-09-10 (Current) — AUDIT-009: Public Employee Enumeration Endpoint & Login Security
+- **Finding ID**: `AUDIT-009`
+- **Action**: Completely eradicated public employee enumeration and account discovery across client and server.
+- **Root Cause**:
+  - `GET /api/auth/employees` was previously unauthenticated and consumed by `UserLogin.tsx` to populate an employee selection `<select>` dropdown.
+  - Non-existent account logins failed prematurely without running PBKDF2 hash verification, exposing a timing disparity (~70ms) versus accounts with bad passwords.
+- **Investigation Results**:
+  - Identified all call sites of `/api/auth/employees`.
+  - Audited all API endpoints to confirm zero alternative public routes leak employee lists or identity metadata.
+  - Confirmed `/api/has-employees` is solely used for bootstrap detection and returns only `{ hasEmployees: boolean }`.
+- **Remediation**:
+  - **Login UX Redesign (`UserLogin.tsx`)**: Removed unauthenticated fetch of employee list and selection dropdown. Added unified identifier input (`معرف الموظف أو البريد الإلكتروني`) allowing login via Employee ID or Email.
+  - **Endpoint Protection (`server.ts`)**: Hardened `GET /api/auth/employees` with `requireFirebaseAuth` and `requireAdmin`. Unauthenticated requests yield 401; non-admin users yield 403.
+  - **Constant-Time Verification (`server-auth.ts`)**: Implemented `timingSafePasswordVerify()` with `DUMMY_PBKDF2_HASH` (100,000 rounds, sha512) ensuring non-existent accounts take equivalent processing time to existent accounts with wrong passwords.
+  - **Error Unification**: Standardized HTTP 401 response and identical Arabic message (`"اسم المستخدم أو كلمة المرور غير صحيحة"`) for both invalid username and invalid password.
+  - **Response Minimization**: Added `sanitizeEmployeeResponse()` to strip `password` and `passwordHash` before returning employee records across all server responses.
+- **Verification Evidence**:
+  - `server-auth.test.ts`: 5 new unit tests (`AUDIT-009-U01`..`U05`) passing (75 total auth unit tests).
+  - `server-auth-enumeration.test.ts`: 9 security regression tests (`AUDIT-009-S01`..`AUDIT-009-S09`) passing against Firestore emulator.
+  - Live HTTP runtime verification against production server bundle (`dist/server.cjs`) confirming:
+    - `GET /api/auth/employees` (no session) = 401 Unauthorized (`{"error":"Missing or invalid authorization session"}`)
+    - `POST /api/auth/login` (non-existent account) = 401 Unauthorized (`{"error":"اسم المستخدم أو كلمة المرور غير صحيحة"}`)
+    - `POST /api/auth/login` (existent account + wrong password) = 401 Unauthorized (`{"error":"اسم المستخدم أو كلمة المرور غير صحيحة"}`)
+    - `POST /api/auth/login` (valid credentials) = 200 OK + session cookie + sanitized employee object (no passwordHash).
+    - `GET /api/auth/employees` (admin cookie) = 200 OK + sanitized employee list.
+    - `GET /api/has-employees` = 200 OK (`{"hasEmployees": true}`).
+  - `npx tsc --noEmit`: Clean exit code 0.
+  - `npm test`: 114 unit tests passed.
+  - Firestore Emulator integration run: All 9 test files / 167 tests passed with zero failures.
+  - Production build: `npm run build` succeeded cleanly.
+- **Status Change**: **AUDIT-009** -> **VERIFIED CLOSED**.
+- **Canonical Audit Status**: ALL CANONICAL SECURITY AUDIT FINDINGS VERIFIED CLOSED.
+

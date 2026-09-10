@@ -542,3 +542,39 @@ export function getCspDirectives(isProduction: boolean): CspDirectives {
   };
 }
 
+// ── Timing-Safe Authentication & Sanitization (AUDIT-009) ──
+
+/**
+ * Pre-computed valid PBKDF2 hash structure to preserve execution timing
+ * during authentication failures for nonexistent accounts (AUDIT-009).
+ */
+export const DUMMY_PBKDF2_HASH =
+  'pbkdf2:sha512:100000:0123456789abcdef0123456789abcdef:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000';
+
+/**
+ * Validates a password while executing a constant-time dummy verification
+ * if the account or storedHash does not exist, eliminating timing enumeration side-channels.
+ */
+export function timingSafePasswordVerify(
+  password: string,
+  storedHash: string | undefined | null,
+  verifyFn: (pw: string, hash: string) => boolean
+): boolean {
+  if (storedHash) {
+    return verifyFn(password, storedHash);
+  }
+  // Execute dummy verification to match timing
+  verifyFn(password || 'dummy-password-value', DUMMY_PBKDF2_HASH);
+  return false;
+}
+
+/**
+ * Strips sensitive credentials (password, passwordHash) and administrative secrets
+ * from employee objects before returning to clients.
+ */
+export function sanitizeEmployeeResponse(emp: any): any {
+  if (!emp || typeof emp !== 'object') return null;
+  const { password, passwordHash, ...safe } = emp;
+  return safe;
+}
+

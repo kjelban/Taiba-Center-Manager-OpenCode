@@ -16,6 +16,9 @@ import {
   hasReadPermission,
   READ_PERMISSIONS,
   PER_COLLECTION_QUERY_POLICY,
+  timingSafePasswordVerify,
+  DUMMY_PBKDF2_HASH,
+  sanitizeEmployeeResponse,
 } from './server-auth';
 
 // ── isValidCollection ──
@@ -661,6 +664,77 @@ describe('AUDIT-007: Query Validation & Pagination Unit Tests', () => {
     const validProduct = validateQueryParameters({ collection: 'products', orderByField: 'name', filterField: 'category', filterValue: 'ملابس' });
     expect(validProduct.error).toBeUndefined();
     expect(validProduct.options?.filterField).toBe('category');
+  });
+});
+
+// ── Timing-Safe Verification & Sanitization Tests (AUDIT-009) ──
+
+describe('AUDIT-009 Unit Tests: Timing-Safe Verification & Sanitization', () => {
+  it('AUDIT-009-U01: timingSafePasswordVerify executes dummy PBKDF2 verification when storedHash is missing', () => {
+    let dummyCalled = false;
+    let checkedPw = '';
+    let checkedHash = '';
+
+    const dummyVerify = (pw: string, hash: string) => {
+      dummyCalled = true;
+      checkedPw = pw;
+      checkedHash = hash;
+      return false;
+    };
+
+    const res = timingSafePasswordVerify('test-pass', undefined, dummyVerify);
+    expect(res).toBe(false);
+    expect(dummyCalled).toBe(true);
+    expect(checkedPw).toBe('test-pass');
+    expect(checkedHash).toBe(DUMMY_PBKDF2_HASH);
+  });
+
+  it('AUDIT-009-U02: timingSafePasswordVerify calls real verify when storedHash is present', () => {
+    let realCalled = false;
+    const realVerify = (pw: string, hash: string) => {
+      realCalled = true;
+      return pw === 'correct';
+    };
+
+    expect(timingSafePasswordVerify('correct', 'stored-hash-val', realVerify)).toBe(true);
+    expect(realCalled).toBe(true);
+    expect(timingSafePasswordVerify('wrong', 'stored-hash-val', realVerify)).toBe(false);
+  });
+
+  it('AUDIT-009-U03: DUMMY_PBKDF2_HASH is a valid PBKDF2 structure with 100,000 rounds', () => {
+    const parts = DUMMY_PBKDF2_HASH.split(':');
+    expect(parts[0]).toBe('pbkdf2');
+    expect(parts[1]).toBe('sha512');
+    expect(parseInt(parts[2], 10)).toBe(100000);
+    expect(parts[3].length).toBe(32);
+    expect(parts[4].length).toBe(128);
+  });
+
+  it('AUDIT-009-U04: sanitizeEmployeeResponse strips password and passwordHash completely', () => {
+    const raw = {
+      id: 'emp-101',
+      name: 'سالم',
+      email: 'salem@taiba.com',
+      passwordHash: 'pbkdf2:sha512:100000:salt:hash',
+      password: 'plain-password',
+      role: 'كاشير',
+      permissions: ['pos'],
+      salary: 1500,
+    };
+
+    const clean = sanitizeEmployeeResponse(raw);
+    expect(clean.passwordHash).toBeUndefined();
+    expect(clean.password).toBeUndefined();
+    expect(clean.id).toBe('emp-101');
+    expect(clean.name).toBe('سالم');
+    expect(clean.email).toBe('salem@taiba.com');
+    expect(clean.salary).toBe(1500);
+  });
+
+  it('AUDIT-009-U05: sanitizeEmployeeResponse returns null for invalid input', () => {
+    expect(sanitizeEmployeeResponse(null)).toBeNull();
+    expect(sanitizeEmployeeResponse(undefined)).toBeNull();
+    expect(sanitizeEmployeeResponse('string')).toBeNull();
   });
 });
 

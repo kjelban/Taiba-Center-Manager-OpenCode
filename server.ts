@@ -24,6 +24,9 @@ import {
   encodeQueryCursor,
   validateQueryParameters,
   getCspDirectives,
+  DUMMY_PBKDF2_HASH,
+  timingSafePasswordVerify,
+  sanitizeEmployeeResponse,
 } from './server-auth';
 
 declare global {
@@ -295,6 +298,65 @@ export async function firestoreFindActiveAttendance(employeeId: string): Promise
     return tB - tA;
   });
   return activeDocs[0];
+}
+
+/**
+ * Resolves an employee record by document ID or email address (AUDIT-009).
+ */
+export async function firestoreFindEmployeeByIdentifier(identifier: string): Promise<any | null> {
+  const trimmed = (identifier || '').trim();
+  if (!trimmed) return null;
+
+  // 1. Direct document ID lookup
+  if (isValidDocumentId(trimmed)) {
+    const byId = await firestoreGetDocument(`employees/${trimmed}`);
+    if (byId) return byId;
+  }
+
+  // 2. Lookup by email address via runQuery
+  try {
+    const token = await getGoogleAccessToken();
+    const baseUrl = getFirestoreBaseUrl();
+    const variants = trimmed.toLowerCase() === trimmed ? [trimmed] : [trimmed, trimmed.toLowerCase()];
+    for (const emailVariant of variants) {
+      const queryBody = {
+        structuredQuery: {
+          from: [{ collectionId: "employees" }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: "email" },
+              op: "EQUAL",
+              value: { stringValue: emailVariant }
+            }
+          },
+          limit: 1
+        }
+      };
+
+      const resp = await fetch(`${baseUrl}/documents:runQuery`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(queryBody),
+      });
+
+      if (resp.ok) {
+        const results = (await resp.json()) as any[];
+        for (const item of results) {
+          if (item.document && item.document.fields) {
+            const doc: Record<string, any> = { id: item.document.name.split("/").pop() };
+            for (const [k, v] of Object.entries(item.document.fields)) {
+              doc[k] = firestoreValueToJs(v as any);
+            }
+            return doc;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    // If runQuery fails, fall through to null
+  }
+
+  return null;
 }
 
 // ---- Firestore Bounded & Paginated Query Engine (AUDIT-007) ----
@@ -1930,16 +1992,8 @@ export function createHelmetMiddleware(isProduction = process.env.NODE_ENV === '
   });
 }
 
-async function startServer() {
-  // Execute startup check for uncompleted restore operations (AUDIT-012 Crash Safety)
-  try {
-    await recoverPendingRestoreOperation();
-  } catch (e: any) {
-    console.error("[AUDIT-012] Startup recovery check encountered an error:", e.message);
-  }
-
+export async function createApp(): Promise<express.Express> {
   const app = express();
-  const PORT = parseInt(process.env.PORT || "3000", 10);
 
   app.set('trust proxy', 1);
 
@@ -1952,6 +2006,7 @@ async function startServer() {
     standardHeaders: true,
     legacyHeaders: false,
     skip: (req) => {
+      if (process.env.NODE_ENV === 'test') return true;
       const skipPaths = [
         '/api/auth/login',
         '/api/clockin',
@@ -1965,7 +2020,7 @@ async function startServer() {
 
   const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 10,
+    max: process.env.NODE_ENV === 'test' ? 10000 : 10,
     message: { error: "Too many login attempts. Please try again after 15 minutes." },
     standardHeaders: true,
     legacyHeaders: false,
@@ -1973,7 +2028,7 @@ async function startServer() {
 
   const adminLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 20,
+    max: process.env.NODE_ENV === 'test' ? 10000 : 20,
     message: { error: "Too many admin requests." },
     standardHeaders: true,
     legacyHeaders: false,
@@ -2142,7 +2197,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/bootstrap", async (req, res) => {
+  const handleBootstrap = async (req: express.Request, res: express.Response) => {
     try {
       const { password, name, email } = req.body;
       const expectedPass = process.env.BOOTSTRAP_PASSWORD;
@@ -2187,37 +2242,40 @@ async function startServer() {
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
-  });
+  };
+
+  app.post("/api/bootstrap", handleBootstrap);
+  app.post("/api/admin/bootstrap", handleBootstrap);
 
   app.post("/api/auth/login", authLimiter, async (req, res) => {
     try {
-      const { employeeId, password } = req.body;
-      if (!employeeId || !password) {
-        return res.status(400).json({ error: "Missing employeeId or password" });
-      }
-      if (!isValidDocumentId(employeeId)) {
-        return res.status(400).json({ error: "Invalid employee ID format" });
+      const { employeeId, email, identifier: rawIdentifier, password } = req.body;
+      const targetIdentifier = (rawIdentifier || employeeId || email || '').trim();
+
+      if (!targetIdentifier || !password) {
+        return res.status(400).json({ error: "Missing identifier or password" });
       }
 
-      const emp = await firestoreGetDocument(`employees/${employeeId}`);
-      if (!emp) {
+      const emp = await firestoreFindEmployeeByIdentifier(targetIdentifier);
+      const storedHash = emp ? (emp.passwordHash || emp.password || '') : null;
+
+      const isValid = timingSafePasswordVerify(password, storedHash, verifyPassword);
+
+      if (!emp || !isValid) {
+        if (emp) {
+          await auditLog('auth_login_failed', emp.id, emp.email, { reason: 'bad_password', ip: req.ip });
+        } else {
+          await auditLog('auth_login_failed', 'unknown', targetIdentifier, { reason: 'account_not_found', ip: req.ip });
+        }
         return res.status(401).json({ error: "اسم المستخدم أو كلمة المرور غير صحيحة" });
       }
 
-      const storedHash = emp.passwordHash || emp.password || '';
-      const isValid = verifyPassword(password, storedHash);
-
-      if (!isValid) {
-        await auditLog('auth_login_failed', employeeId, emp.email, { reason: 'bad_password', ip: req.ip });
-        return res.status(401).json({ error: "اسم المستخدم أو كلمة المرور غير صحيحة" });
-      }
-
-      if (isLegacyPassword(storedHash)) {
+      if (isLegacyPassword(storedHash!)) {
         try {
           const newHash = hashPassword(password);
           const updatedEmp = { ...emp, passwordHash: newHash };
           delete updatedEmp.password;
-          await firestoreSetDocument('employees', employeeId, updatedEmp);
+          await firestoreSetDocument('employees', emp.id, updatedEmp);
         } catch (migErr) {
           console.error('Password auto-migration failed:', migErr);
         }
@@ -2225,18 +2283,42 @@ async function startServer() {
 
       const sessionToken = `sess_${generateSessionToken()}`;
       const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
-      serverSessions.set(sessionToken, { employeeId, expiresAt });
+      serverSessions.set(sessionToken, { employeeId: emp.id, expiresAt });
 
       setSessionCookie(res, sessionToken, 24 * 60 * 60 * 1000);
 
-      const safeEmployee = { ...emp };
-      delete safeEmployee.passwordHash;
-      delete safeEmployee.password;
+      const safeEmployee = sanitizeEmployeeResponse(emp);
 
-      await auditLog('auth_login_success', employeeId, emp.email, { ip: req.ip });
+      await auditLog('auth_login_success', emp.id, emp.email, { ip: req.ip });
       res.json({ ok: true, employee: safeEmployee });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Protected: list employee records for administration (AUDIT-009)
+  // Strictly requires authentication and admin privileges. Never exposes password/hashes.
+  app.get("/api/auth/employees", requireFirebaseAuth, requireAdmin, async (req, res) => {
+    try {
+      const token = await getGoogleAccessToken();
+      const baseUrl = getFirestoreBaseUrl();
+      const resp = await fetch(
+        `${baseUrl}/documents/employees`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!resp.ok) return res.json([]);
+      const data = await resp.json() as any;
+      if (!data.documents) return res.json([]);
+      const employees = data.documents.map((doc: any) => {
+        const docObj: Record<string, any> = { id: doc.name.split('/').pop() };
+        for (const [k, v] of Object.entries(doc.fields || {})) {
+          docObj[k] = firestoreValueToJs(v as any);
+        }
+        return sanitizeEmployeeResponse(docObj);
+      }).filter((e: any) => e && (e.name || e.email));
+      res.json(employees);
+    } catch {
+      res.json([]);
     }
   });
 
@@ -3176,6 +3258,20 @@ ${JSON.stringify(summary, null, 2)}
   });
 
   // ---- end proxy endpoints ----
+
+  return app;
+}
+
+async function startServer() {
+  // Execute startup check for uncompleted restore operations (AUDIT-012 Crash Safety)
+  try {
+    await recoverPendingRestoreOperation();
+  } catch (e: any) {
+    console.error("[AUDIT-012] Startup recovery check encountered an error:", e.message);
+  }
+
+  const app = await createApp();
+  const PORT = parseInt(process.env.PORT || "3000", 10);
 
   const isProd = process.env.NODE_ENV === "production";
   if (!isProd) {
