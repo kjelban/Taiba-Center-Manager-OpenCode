@@ -10,14 +10,14 @@ This document provides the canonical registry and status of all security audit f
 | Finding ID | Severity | Category | Status | Commit / Milestone | Description |
 |---|---|---|---|---|---|
 | **AUDIT-004** | HIGH | Auth & Session Integrity | **VERIFIED CLOSED** | `2567e74`, `0a248d3` | Clock-in / clock-out session reconciliation, multi-tab sync, and server authority. |
-| **AUDIT-005** | HIGH | Financial / Data Integrity | **VERIFIED CLOSED** | `8d32d01` | Race conditions & OCC concurrency in stock deduction & customer debt balance. |
+| **AUDIT-005** | HIGH | Financial / Data Integrity | **VERIFIED CLOSED** | `2567e74` | Race conditions & OCC concurrency in stock deduction & customer debt balance. |
 | **AUDIT-007** | MEDIUM | Performance / Scalability | **VERIFIED CLOSED** | `3ccb734` | Unbounded Firestore collection reads bounded via cursor pagination & date ranges. |
-| **AUDIT-009** | MEDIUM | Information Disclosure | **VERIFIED CLOSED** | `Current HEAD` | Public Employee Enumeration Endpoint eliminated: unauthenticated listing removed, login redesigned with identifier, constant-time authentication, server response minimization. |
+| **AUDIT-009** | MEDIUM | Information Disclosure | **VERIFIED CLOSED** | `471a6db`, `2962685`, `5ee7fb2` | Public Employee Enumeration Endpoint eliminated: unauthenticated listing removed, login redesigned with identifier, equivalent password-verification work, server response minimization. |
 | **AUDIT-010** | MEDIUM | Web Security / CSP | **VERIFIED CLOSED** | `f253b25` | Content Security Policy script-src hardening: removed `'unsafe-inline'` and `'unsafe-eval'` in production. |
-| **AUDIT-012** | CRITICAL | Disaster Recovery / Integrity | **VERIFIED CLOSED** | `8fd1a22`, `c8d20f9` | Backup restore transaction safety, exact replacement, durable journal & crash rollback. |
-| **AUDIT-013** | HIGH | Financial Integrity | **VERIFIED CLOSED** | `8d32d01` | Server-authoritative price recalculation overriding untrusted client totals. |
-| **AUDIT-014** | HIGH | Financial Integrity | **VERIFIED CLOSED** | `8d32d01` | Distributed idempotency protection preventing duplicate transaction submission. |
-| **AUDIT-015** | MEDIUM | Supply Chain / Dependencies | **VERIFIED CLOSED** | `5a472c1` | Dependency vulnerability reachability triage and safe package overrides. |
+| **AUDIT-012** | CRITICAL | Disaster Recovery / Integrity | **VERIFIED CLOSED** | `8fd1a22`, `4d852ba` | Backup restore transaction safety, exact replacement, durable journal & crash rollback. |
+| **AUDIT-013** | HIGH | Financial Integrity | **VERIFIED CLOSED** | `2567e74` | Server-authoritative price recalculation overriding untrusted client totals. |
+| **AUDIT-014** | HIGH | Financial Integrity | **VERIFIED CLOSED** | `2567e74` | Distributed idempotency protection preventing duplicate transaction submission. |
+| **AUDIT-015** | MEDIUM | Supply Chain / Dependencies | **VERIFIED CLOSED** | `7f0b741` | Dependency vulnerability reachability triage and safe package overrides. |
 | **AUDIT-016** | HIGH | Credential Exposure | **VERIFIED CLOSED** | `afad7bb` | Verification that raw session credentials and bearer tokens are not exposed to browser storage. |
 
 ---
@@ -66,7 +66,7 @@ Historically, `GET /api/auth/employees` was completely unauthenticated and serve
 2. **Access Control on `/api/auth/employees`**:
    - Protected the endpoint with both `requireFirebaseAuth` and `requireAdmin`. Unauthenticated requests receive HTTP 401 Unauthorized; non-admin users receive HTTP 403 Forbidden.
    - Zero alternative or renamed public enumeration endpoints exist across the entire API surface.
-3. **Constant-Time Login & Error Unification (`POST /api/auth/login`)**:
+3. **Login Timing Discrepancy Elimination & Error Unification (`POST /api/auth/login`)**:
    - Implemented `timingSafePasswordVerify()` in `server-auth.ts`: when an account or password hash does not exist, a pre-computed dummy PBKDF2 verification (100,000 iterations, sha512) is executed against `DUMMY_PBKDF2_HASH`.
    - Unified authentication failure semantics: both non-existent accounts and incorrect passwords return identical HTTP 401 Unauthorized status with the localized generic message `"اسم المستخدم أو كلمة المرور غير صحيحة"`.
 4. **Server-Side Response Data Minimization**:
@@ -85,7 +85,7 @@ Historically, `GET /api/auth/employees` was completely unauthenticated and serve
     3. **Email (Existing Account)**: n=50, Median = 94.49 ms, Mean = 97.83 ms, P95 = 112.56 ms, StdDev = 17.58 ms
     4. **Email (Nonexistent Account)**: n=50, Median = 94.39 ms, Mean = 94.95 ms, P95 = 110.14 ms, StdDev = 7.43 ms
        - **Mean Difference**: -2.88 ms, **Median Difference**: -0.10 ms, **Mean Ratio**: 0.971
-  - **Timing Assessment**: Equivalent password-verification work with no practically useful account-existence timing discrepancy observed under the tested conditions.
+  - **Timing Assessment**: **TIMING PORTION VERIFIED** — Equivalent password-verification work with no practically useful account-existence timing discrepancy observed under the tested conditions.
 - **Integration Test Suite**: `server-auth-enumeration.test.ts` covering `AUDIT-009-S01` through `AUDIT-009-S09` and `AUDIT-009-T01` through `AUDIT-009-T06` running against Firestore emulator, asserting:
   - Equivalent PBKDF2 iterations (100,000 rounds) across existing and nonexistent IDs and emails.
   - Identical HTTP 401 status and error message (`"اسم المستخدم أو كلمة المرور غير صحيحة"`).

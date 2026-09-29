@@ -5,15 +5,15 @@ This log tracks chronologically all remediation, validation, and status updates 
 ---
 
 ### Entry: 2026-08-20 — AUDIT-004, AUDIT-005, AUDIT-013, AUDIT-014, AUDIT-016
-- **AUDIT-005, AUDIT-013, AUDIT-014**: Financial mutations protected with Firestore OCC transactions, server-side authoritative pricing, and SHA-256 idempotency fingerprinting. Verified closed under `8d32d01`.
+- **AUDIT-005, AUDIT-013, AUDIT-014**: Financial mutations protected with Firestore OCC transactions, server-side authoritative pricing, and SHA-256 idempotency fingerprinting. Verified closed under `2567e74`.
 - **AUDIT-004**: Attendance session tracking reconciled with server state and cross-tab BroadcastChannel sync. Verified closed under `2567e74` and `0a248d3`.
 - **AUDIT-016**: Credential exposure audit confirmed no session tokens or credentials leaked to browser localStorage or raw JSON bodies. Verified closed under `afad7bb`.
 
 ---
 
 ### Entry: 2026-08-21 — AUDIT-012, AUDIT-015
-- **AUDIT-012**: Backup restore engine re-engineered with durable pre-restore snapshot storage, transactional write batching, post-restore verification with compensating automated rollback, and startup crash recovery. Verified closed under `8fd1a22` and `c8d20f9`.
-- **AUDIT-015**: Dependency vulnerability reachability triage executed. High-risk supply chain advisories addressed via safe package overrides in `package.json`. Verified closed under `5a472c1`.
+- **AUDIT-012**: Backup restore engine re-engineered with durable pre-restore snapshot storage, transactional write batching, post-restore verification with compensating automated rollback, and startup crash recovery. Verified closed under `8fd1a22` and `4d852ba`.
+- **AUDIT-015**: Dependency vulnerability reachability triage executed. High-risk supply chain advisories addressed via safe package overrides in `package.json`. Verified closed under `7f0b741`.
 
 ---
 
@@ -64,7 +64,7 @@ This log tracks chronologically all remediation, validation, and status updates 
 - **Remediation**:
   - **Login UX Redesign (`UserLogin.tsx`)**: Removed unauthenticated fetch of employee list and selection dropdown. Added unified identifier input (`معرف الموظف أو البريد الإلكتروني`) allowing login via Employee ID or Email.
   - **Endpoint Protection (`server.ts`)**: Hardened `GET /api/auth/employees` with `requireFirebaseAuth` and `requireAdmin`. Unauthenticated requests yield 401; non-admin users yield 403.
-  - **Constant-Time Verification (`server-auth.ts`)**: Implemented `timingSafePasswordVerify()` with `DUMMY_PBKDF2_HASH` (100,000 rounds, sha512) ensuring non-existent accounts take equivalent processing time to existent accounts with wrong passwords.
+  - **Timing Discrepancy Elimination (`server-auth.ts`)**: Implemented `timingSafePasswordVerify()` with `DUMMY_PBKDF2_HASH` (100,000 rounds, sha512) ensuring non-existent accounts take equivalent processing time to existent accounts with wrong passwords.
   - **Error Unification**: Standardized HTTP 401 response and identical Arabic message (`"اسم المستخدم أو كلمة المرور غير صحيحة"`) for both invalid username and invalid password.
   - **Response Minimization**: Added `sanitizeEmployeeResponse()` to strip `password` and `passwordHash` before returning employee records across all server responses.
 - **Verification Evidence**:
@@ -93,12 +93,12 @@ This log tracks chronologically all remediation, validation, and status updates 
   - Code analysis revealed that `firestoreFindEmployeeByIdentifier()` was falling through to execute an email structured query (`documents:runQuery`) when an employee ID lookup failed, introducing an extra Firestore network roundtrip for nonexistent IDs.
 - **Remediation**:
   - **Code Path Isolation**: Segregated email queries (containing `@`, querying via structuredQuery with `IN` filter) from employee ID lookups (pure document GET). Both existent and nonexistent identifiers of the same type now execute exactly one database operation.
-  - **Constant-Time Cryptographic Verification**: `timingSafePasswordVerify()` ensures 100,000 rounds of PBKDF2 with SHA-512 and identical key lengths regardless of account existence.
+  - **Cryptographic Password-Verification Parity**: `timingSafePasswordVerify()` ensures 100,000 rounds of PBKDF2 with SHA-512 and identical key lengths regardless of account existence.
   - **Rate Limiting Hardening**: Added `getAuthLimiterOptions()` enforcing strict 10 attempts per 15-minute window in production.
 - **Statistical Benchmark Results (50 Samples / Condition, 200 Total Trials)**:
   - Employee ID: Existing (Median: 94.62 ms, Mean: 96.11 ms, P95: 113.68 ms) vs Nonexistent (Median: 93.99 ms, Mean: 94.55 ms, P95: 109.84 ms) -> Mean Diff: -1.56 ms, Median Diff: -0.63 ms, Mean Ratio: 0.984.
   - Email: Existing (Median: 94.49 ms, Mean: 97.83 ms, P95: 112.56 ms) vs Nonexistent (Median: 94.39 ms, Mean: 94.95 ms, P95: 110.14 ms) -> Mean Diff: -2.88 ms, Median Diff: -0.10 ms, Mean Ratio: 0.971.
-  - Equivalent password-verification work with no practically useful account-existence timing discrepancy observed under the tested conditions.
+  - **TIMING PORTION VERIFIED**: Equivalent password-verification work with no practically useful account-existence timing discrepancy observed under the tested conditions.
 - **Verification Evidence**:
   - Unit tests: `server-auth.test.ts` (76/76 passing, including `AUDIT-009-U01`..`U06`).
   - Integration suite: `server-auth-enumeration.test.ts` expanded with `AUDIT-009-T01` through `AUDIT-009-T06` (14/14 passing).
