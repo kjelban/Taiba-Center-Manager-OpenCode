@@ -19,6 +19,7 @@ import {
   timingSafePasswordVerify,
   DUMMY_PBKDF2_HASH,
   sanitizeEmployeeResponse,
+  getAuthLimiterOptions,
 } from './server-auth';
 
 // ── isValidCollection ──
@@ -735,6 +736,16 @@ describe('AUDIT-009 Unit Tests: Timing-Safe Verification & Sanitization', () => 
     expect(sanitizeEmployeeResponse(null)).toBeNull();
     expect(sanitizeEmployeeResponse(undefined)).toBeNull();
     expect(sanitizeEmployeeResponse('string')).toBeNull();
+  });
+
+  it('AUDIT-009-U06: getAuthLimiterOptions enforces max 10 in production and high threshold in test', () => {
+    const prod = getAuthLimiterOptions(true);
+    expect(prod.max).toBe(10);
+    expect(prod.windowMs).toBe(15 * 60 * 1000);
+    expect(prod.standardHeaders).toBe(true);
+
+    const testEnv = getAuthLimiterOptions(false);
+    expect(testEnv.max).toBe(10000);
   });
 });
 

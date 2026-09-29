@@ -27,6 +27,7 @@ import {
   DUMMY_PBKDF2_HASH,
   timingSafePasswordVerify,
   sanitizeEmployeeResponse,
+  getAuthLimiterOptions,
 } from './server-auth';
 
 declare global {
@@ -307,28 +308,36 @@ export async function firestoreFindEmployeeByIdentifier(identifier: string): Pro
   const trimmed = (identifier || '').trim();
   if (!trimmed) return null;
 
-  // 1. Direct document ID lookup
-  if (isValidDocumentId(trimmed)) {
-    const byId = await firestoreGetDocument(`employees/${trimmed}`);
-    if (byId) return byId;
-  }
-
-  // 2. Lookup by email address via runQuery
-  try {
-    const token = await getGoogleAccessToken();
-    const baseUrl = getFirestoreBaseUrl();
-    const variants = trimmed.toLowerCase() === trimmed ? [trimmed] : [trimmed, trimmed.toLowerCase()];
-    for (const emailVariant of variants) {
-      const queryBody = {
-        structuredQuery: {
-          from: [{ collectionId: "employees" }],
-          where: {
+  // 1. If identifier contains '@', it is an email address: execute a single structured query
+  if (trimmed.includes('@')) {
+    try {
+      const token = await getGoogleAccessToken();
+      const baseUrl = getFirestoreBaseUrl();
+      const variants = trimmed.toLowerCase() === trimmed ? [trimmed] : [trimmed, trimmed.toLowerCase()];
+      const filter = variants.length === 1
+        ? {
             fieldFilter: {
               field: { fieldPath: "email" },
               op: "EQUAL",
-              value: { stringValue: emailVariant }
+              value: { stringValue: variants[0] }
             }
-          },
+          }
+        : {
+            fieldFilter: {
+              field: { fieldPath: "email" },
+              op: "IN",
+              value: {
+                arrayValue: {
+                  values: variants.map(v => ({ stringValue: v }))
+                }
+              }
+            }
+          };
+
+      const queryBody = {
+        structuredQuery: {
+          from: [{ collectionId: "employees" }],
+          where: filter,
           limit: 1
         }
       };
@@ -351,9 +360,16 @@ export async function firestoreFindEmployeeByIdentifier(identifier: string): Pro
           }
         }
       }
+    } catch (e) {
+      // Fall through to null
     }
-  } catch (e) {
-    // If runQuery fails, fall through to null
+    return null;
+  }
+
+  // 2. Otherwise, identifier is an employee document ID: execute direct document lookup only
+  if (isValidDocumentId(trimmed)) {
+    const byId = await firestoreGetDocument(`employees/${trimmed}`);
+    if (byId) return byId;
   }
 
   return null;
@@ -2018,13 +2034,7 @@ export async function createApp(): Promise<express.Express> {
     },
   });
 
-  const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: process.env.NODE_ENV === 'test' ? 10000 : 10,
-    message: { error: "Too many login attempts. Please try again after 15 minutes." },
-    standardHeaders: true,
-    legacyHeaders: false,
-  });
+  const authLimiter = rateLimit(getAuthLimiterOptions(process.env.NODE_ENV === 'production'));
 
   const adminLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,

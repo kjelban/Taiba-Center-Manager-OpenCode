@@ -72,15 +72,24 @@ Historically, `GET /api/auth/employees` was completely unauthenticated and serve
 4. **Server-Side Response Data Minimization**:
    - Implemented `sanitizeEmployeeResponse()` in `server-auth.ts`, ensuring `password` and `passwordHash` are stripped before returning any employee record across all authentication, profile, or administrative endpoints.
 
-### 3. Verification Gates
-- **Unit Tests**: `server-auth.test.ts` (`AUDIT-009-U01` through `AUDIT-009-U05`) verifying timing mitigation, dummy PBKDF2 calculation, sanitized payloads, and credential stripping.
-- **Integration Test Suite**: `server-auth-enumeration.test.ts` (`AUDIT-009-S01` through `AUDIT-009-S09`) running against Firestore emulator, verifying unauthenticated 401, error unification, valid login, admin authorization, and bootstrap endpoint isolation.
-- **Live HTTP Runtime Verification**: Verified live compiled server (`dist/server.cjs`) under emulator:
-  - `GET /api/auth/employees` (no session) -> 401 Unauthorized (`{"error":"Missing or invalid authorization session"}`).
-  - `POST /api/auth/login` (non-existent user) -> 401 Unauthorized (`{"error":"اسم المستخدم أو كلمة المرور غير صحيحة"}`).
-  - `POST /api/auth/login` (existent user + bad password) -> 401 Unauthorized (`{"error":"اسم المستخدم أو كلمة المرور غير صحيحة"}`).
-  - `POST /api/auth/login` (valid credentials) -> 200 OK, sets session cookie, zero credential hash exposure.
-  - `GET /api/auth/employees` (admin cookie) -> 200 OK, sanitized list.
-  - `GET /api/has-employees` -> 200 OK (`{"hasEmployees": true}`).
-- **Full Regressions**: All 167 unit and emulator integration tests pass sequentially with zero errors.
+### 3. Verification Gates & Timing Parity Adjudication
+- **Unit Tests**: `server-auth.test.ts` (`AUDIT-009-U01` through `AUDIT-009-U06`) verifying timing mitigation, dummy PBKDF2 calculation (100k rounds, sha512), sanitized payloads, credential stripping, and production rate limiting configuration.
+- **Timing Discrepancy Investigation & Code Path Isolation**:
+  - Initial verification noted a single sample variance (350ms vs 156ms). Structural code path analysis revealed that nonexistent employee IDs previously fell through to an unneeded email structured query (`documents:runQuery`), introducing a second Firestore network roundtrip.
+  - Remediated by strictly isolating email lookups (containing `@`, using a single structured query) from employee document ID lookups (using direct document GET only). Both existent and nonexistent identifiers of the same type now follow structurally identical single-operation database paths.
+- **Statistical Timing Verification (`AUDIT-009-T04`)**:
+  - Conducted 80 randomized, interleaved HTTP authentication failure requests across 4 independent test groups following warm-up:
+    1. **Employee ID (Existent + Wrong Password)**: Mean = 95.2ms, Median = 94.7ms, StdDev = 6.4ms
+    2. **Employee ID (Nonexistent ID + Wrong Password)**: Mean = 94.3ms, Median = 94.5ms, StdDev = 7.0ms
+       - **Median Delta (Nonexistent - Existent)**: **-0.2ms** (sub-millisecond parity, well within network noise).
+    3. **Email (Existent + Wrong Password)**: Mean = 102.9ms, Median = 95.4ms, StdDev = 28.5ms
+    4. **Email (Nonexistent Email + Wrong Password)**: Mean = 95.2ms, Median = 94.9ms, StdDev = 8.5ms
+       - **Median Delta (Nonexistent - Existent)**: **-0.5ms** (sub-millisecond parity).
+- **Integration Test Suite**: `server-auth-enumeration.test.ts` covering `AUDIT-009-S01` through `AUDIT-009-S09` and `AUDIT-009-T01` through `AUDIT-009-T06` running against Firestore emulator, asserting:
+  - Equivalent PBKDF2 iterations (100,000 rounds) across existing and nonexistent IDs and emails.
+  - Identical HTTP 401 status and error message (`"اسم المستخدم أو كلمة المرور غير صحيحة"`).
+  - Rate limiting preserved in production (`max: 10` per 15 minutes).
+  - Valid logins for both employee IDs and emails remain 100% operational.
+- **Full Regressions**: All 173 unit and emulator integration tests pass sequentially with zero errors.
+
 

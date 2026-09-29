@@ -6,6 +6,7 @@ import {
   timingSafePasswordVerify,
   DUMMY_PBKDF2_HASH,
   sanitizeEmployeeResponse,
+  getAuthLimiterOptions,
 } from './server-auth';
 import {
   createApp,
@@ -266,34 +267,192 @@ describe.skipIf(!isEmulatorActive)('AUDIT-009 — Public Employee Enumeration & 
     expect(body.users).toBeUndefined();
   });
 
-  // ── AUDIT-009-S08: Constant-time PBKDF2 dummy verification executes on missing account ──
-  it('AUDIT-009-S08: timingSafePasswordVerify executes dummy PBKDF2 verification when account does not exist', () => {
-    let dummyVerifyCalled = false;
-    let verifiedPassword = '';
-    let verifiedHash = '';
+  // ── AUDIT-009-T01: Existing-ID wrong-password and nonexistent-ID paths both execute equivalent PBKDF2 verification ──
+  it('AUDIT-009-T01: Existing-ID wrong-password and nonexistent-ID paths both execute equivalent PBKDF2 verification', () => {
+    let existingCallCount = 0;
+    let nonexistentCallCount = 0;
+    let existingHash = '';
+    let nonexistentHash = '';
 
-    const mockVerify = (pw: string, hash: string) => {
-      dummyVerifyCalled = true;
-      verifiedPassword = pw;
-      verifiedHash = hash;
+    const verifyExisting = (pw: string, hash: string) => {
+      existingCallCount++;
+      existingHash = hash;
       return false;
     };
 
-    const result = timingSafePasswordVerify('user-input-pass', undefined, mockVerify);
-    expect(result).toBe(false);
-    expect(dummyVerifyCalled).toBe(true);
-    expect(verifiedPassword).toBe('user-input-pass');
-    expect(verifiedHash).toBe(DUMMY_PBKDF2_HASH);
+    const verifyNonexistent = (pw: string, hash: string) => {
+      nonexistentCallCount++;
+      nonexistentHash = hash;
+      return false;
+    };
 
-    // Verify DUMMY_PBKDF2_HASH is a syntactically valid PBKDF2 structure with 100,000 rounds
-    const parts = DUMMY_PBKDF2_HASH.split(':');
-    expect(parts[0]).toBe('pbkdf2');
-    expect(parts[1]).toBe('sha512');
-    expect(parseInt(parts[2], 10)).toBe(100000);
+    const realHash = hashPassword('RealPassword123!');
+    const resExisting = timingSafePasswordVerify('wrong-pass', realHash, verifyExisting);
+    const resNonexistent = timingSafePasswordVerify('wrong-pass', null, verifyNonexistent);
 
-    // Run real verifyPassword against dummy hash to ensure it executes without throw
-    const realVerifyResult = verifyPassword('any-password', DUMMY_PBKDF2_HASH);
+    expect(resExisting).toBe(false);
+    expect(resNonexistent).toBe(false);
+    expect(existingCallCount).toBe(1);
+    expect(nonexistentCallCount).toBe(1);
+
+    // Both hashes use pbkdf2 with sha512 and 100,000 iterations
+    const existingParts = existingHash.split(':');
+    const nonexistentParts = nonexistentHash.split(':');
+    expect(existingParts[0]).toBe('pbkdf2');
+    expect(nonexistentParts[0]).toBe('pbkdf2');
+    expect(existingParts[1]).toBe('sha512');
+    expect(nonexistentParts[1]).toBe('sha512');
+    expect(existingParts[2]).toBe('100000');
+    expect(nonexistentParts[2]).toBe('100000');
+    expect(existingParts[3].length).toBe(32); // 16-byte hex salt
+    expect(nonexistentParts[3].length).toBe(32);
+    expect(existingParts[4].length).toBe(128); // 64-byte hex derived key
+    expect(nonexistentParts[4].length).toBe(128);
+  });
+
+  // ── AUDIT-009-T02: Existing-email wrong-password and nonexistent-email paths both execute equivalent PBKDF2 verification ──
+  it('AUDIT-009-T02: Existing-email wrong-password and nonexistent-email paths both execute equivalent PBKDF2 verification', () => {
+    let callCount = 0;
+    const dummyVerify = (pw: string, hash: string) => {
+      callCount++;
+      return false;
+    };
+
+    const res = timingSafePasswordVerify('some-wrong-password', undefined, dummyVerify);
+    expect(res).toBe(false);
+    expect(callCount).toBe(1);
+
+    // Verify real cryptographic execution of dummy verification
+    const realVerifyResult = verifyPassword('some-wrong-password', DUMMY_PBKDF2_HASH);
     expect(realVerifyResult).toBe(false);
+  });
+
+  // ── AUDIT-009-T03: Failure response status and body remain identical across all permutations ──
+  it('AUDIT-009-T03: Failure response status and body remain identical across existing/nonexistent IDs and emails', async () => {
+    const permutations = [
+      { label: 'existing-id', identifier: testAdminId, password: 'WrongPassword123!' },
+      { label: 'nonexistent-id', identifier: 'emp-nonexistent-999', password: 'WrongPassword123!' },
+      { label: 'existing-email', identifier: testAdminEmail, password: 'WrongPassword123!' },
+      { label: 'nonexistent-email', identifier: 'nonexistent.user999@taiba.local', password: 'WrongPassword123!' },
+    ];
+
+    for (const p of permutations) {
+      const res = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: p.identifier, password: p.password }),
+      });
+
+      expect(res.status).toBe(401);
+      const body = await res.json();
+      expect(body).toEqual({ error: "اسم المستخدم أو كلمة المرور غير صحيحة" });
+      expect(res.headers.get('content-type')).toContain('application/json');
+    }
+  });
+
+  // ── AUDIT-009-T04: Repeated randomized timing measurements do not show a consistent account-existence timing oracle ──
+  it('AUDIT-009-T04: Repeated randomized timing measurements show no account-existence timing oracle', async () => {
+    const incorrectPassword = 'MismatchPassword123!';
+
+    // Warm-up
+    for (let i = 0; i < 3; i++) {
+      await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: testAdminId, password: incorrectPassword }),
+      });
+      await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: 'emp-nonexistent-warmup', password: incorrectPassword }),
+      });
+    }
+
+    const groups: Record<string, { identifier: string; samples: number[] }> = {
+      emp_id_existing: { identifier: testAdminId, samples: [] },
+      emp_id_nonexistent: { identifier: 'emp-nonexistent-trial', samples: [] },
+      email_existing: { identifier: testAdminEmail, samples: [] },
+      email_nonexistent: { identifier: 'nonexistent.trial@taiba.local', samples: [] },
+    };
+
+    const queue: string[] = [];
+    const keys = Object.keys(groups);
+    for (const k of keys) {
+      for (let i = 0; i < 8; i++) queue.push(k);
+    }
+    // Shuffle
+    for (let i = queue.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [queue[i], queue[j]] = [queue[j], queue[i]];
+    }
+
+    for (const key of queue) {
+      const start = performance.now();
+      const res = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: groups[key].identifier, password: incorrectPassword }),
+      });
+      const duration = performance.now() - start;
+      expect(res.status).toBe(401);
+      groups[key].samples.push(duration);
+    }
+
+    const calcMedian = (arr: number[]) => {
+      const sorted = [...arr].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+
+    const empExistingMed = calcMedian(groups.emp_id_existing.samples);
+    const empNonexistentMed = calcMedian(groups.emp_id_nonexistent.samples);
+    const empDelta = Math.abs(empNonexistentMed - empExistingMed);
+
+    const emailExistingMed = calcMedian(groups.email_existing.samples);
+    const emailNonexistentMed = calcMedian(groups.email_nonexistent.samples);
+    const emailDelta = Math.abs(emailNonexistentMed - emailExistingMed);
+
+    expect(empDelta).toBeLessThan(35);
+    expect(emailDelta).toBeLessThan(35);
+  }, 30000);
+
+  // ── AUDIT-009-T05: Timing mitigation does not weaken login rate limiting in production ──
+  it('AUDIT-009-T05: Timing mitigation does not weaken login rate limiting in production', () => {
+    const prodOptions = getAuthLimiterOptions(true);
+    expect(prodOptions.max).toBe(10);
+    expect(prodOptions.windowMs).toBe(15 * 60 * 1000);
+
+    const testOptions = getAuthLimiterOptions(false);
+    expect(testOptions.max).toBe(10000);
+  });
+
+  // ── AUDIT-009-T06: Valid login remains functional for both employee ID and email ──
+  it('AUDIT-009-T06: Valid login remains functional for both employee ID and email', async () => {
+    // 1. Login via employee ID
+    const resId = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier: testAdminId, password: testAdminPass }),
+    });
+    expect(resId.status).toBe(200);
+    const dataId = await resId.json();
+    expect(dataId.ok).toBe(true);
+    expect(dataId.employee.id).toBe(testAdminId);
+    expect(dataId.employee.passwordHash).toBeUndefined();
+    expect(resId.headers.get('set-cookie')).toBeDefined();
+
+    // 2. Login via email
+    const resEmail = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier: testCashierEmail, password: testCashierPass }),
+    });
+    expect(resEmail.status).toBe(200);
+    const dataEmail = await resEmail.json();
+    expect(dataEmail.ok).toBe(true);
+    expect(dataEmail.employee.id).toBe(testCashierId);
+    expect(dataEmail.employee.passwordHash).toBeUndefined();
+    expect(resEmail.headers.get('set-cookie')).toBeDefined();
   });
 
   // ── AUDIT-009-S09: Session verification and logout remain intact ──

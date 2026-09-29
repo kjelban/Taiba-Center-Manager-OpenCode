@@ -578,3 +578,18 @@ export function sanitizeEmployeeResponse(emp: any): any {
   return safe;
 }
 
+/**
+ * Returns rate limiting options for authentication routes (AUDIT-009).
+ * Enforces strict 10 attempts per 15 minutes in production while permitting high throughput in testing.
+ */
+export function getAuthLimiterOptions(isProduction: boolean) {
+  return {
+    windowMs: 15 * 60 * 1000,
+    max: isProduction ? 10 : 10000,
+    message: { error: "Too many login attempts. Please try again after 15 minutes." },
+    standardHeaders: true,
+    legacyHeaders: false,
+  };
+}
+
+
