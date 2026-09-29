@@ -77,14 +77,15 @@ Historically, `GET /api/auth/employees` was completely unauthenticated and serve
 - **Timing Discrepancy Investigation & Code Path Isolation**:
   - Initial verification noted a single sample variance (350ms vs 156ms). Structural code path analysis revealed that nonexistent employee IDs previously fell through to an unneeded email structured query (`documents:runQuery`), introducing a second Firestore network roundtrip.
   - Remediated by strictly isolating email lookups (containing `@`, using a single structured query) from employee document ID lookups (using direct document GET only). Both existent and nonexistent identifiers of the same type now follow structurally identical single-operation database paths.
-- **Statistical Timing Verification (`AUDIT-009-T04`)**:
-  - Conducted 80 randomized, interleaved HTTP authentication failure requests across 4 independent test groups following warm-up:
-    1. **Employee ID (Existent + Wrong Password)**: Mean = 95.2ms, Median = 94.7ms, StdDev = 6.4ms
-    2. **Employee ID (Nonexistent ID + Wrong Password)**: Mean = 94.3ms, Median = 94.5ms, StdDev = 7.0ms
-       - **Median Delta (Nonexistent - Existent)**: **-0.2ms** (sub-millisecond parity, well within network noise).
-    3. **Email (Existent + Wrong Password)**: Mean = 102.9ms, Median = 95.4ms, StdDev = 28.5ms
-    4. **Email (Nonexistent Email + Wrong Password)**: Mean = 95.2ms, Median = 94.9ms, StdDev = 8.5ms
-       - **Median Delta (Nonexistent - Existent)**: **-0.5ms** (sub-millisecond parity).
+- **Statistical Timing Verification (50 Samples / Condition, 200 Total Trials)**:
+  - Conducted 200 randomized, interleaved HTTP authentication failure requests across 4 independent test groups following warm-up:
+    1. **Employee ID (Existing Account)**: n=50, Median = 94.62 ms, Mean = 96.11 ms, P95 = 113.68 ms, StdDev = 9.47 ms
+    2. **Employee ID (Nonexistent Account)**: n=50, Median = 93.99 ms, Mean = 94.55 ms, P95 = 109.84 ms, StdDev = 6.87 ms
+       - **Mean Difference**: -1.56 ms, **Median Difference**: -0.63 ms, **Mean Ratio**: 0.984
+    3. **Email (Existing Account)**: n=50, Median = 94.49 ms, Mean = 97.83 ms, P95 = 112.56 ms, StdDev = 17.58 ms
+    4. **Email (Nonexistent Account)**: n=50, Median = 94.39 ms, Mean = 94.95 ms, P95 = 110.14 ms, StdDev = 7.43 ms
+       - **Mean Difference**: -2.88 ms, **Median Difference**: -0.10 ms, **Mean Ratio**: 0.971
+  - **Timing Assessment**: Equivalent password-verification work with no practically useful account-existence timing discrepancy observed under the tested conditions.
 - **Integration Test Suite**: `server-auth-enumeration.test.ts` covering `AUDIT-009-S01` through `AUDIT-009-S09` and `AUDIT-009-T01` through `AUDIT-009-T06` running against Firestore emulator, asserting:
   - Equivalent PBKDF2 iterations (100,000 rounds) across existing and nonexistent IDs and emails.
   - Identical HTTP 401 status and error message (`"اسم المستخدم أو كلمة المرور غير صحيحة"`).

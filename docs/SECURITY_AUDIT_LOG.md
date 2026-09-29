@@ -95,9 +95,10 @@ This log tracks chronologically all remediation, validation, and status updates 
   - **Code Path Isolation**: Segregated email queries (containing `@`, querying via structuredQuery with `IN` filter) from employee ID lookups (pure document GET). Both existent and nonexistent identifiers of the same type now execute exactly one database operation.
   - **Constant-Time Cryptographic Verification**: `timingSafePasswordVerify()` ensures 100,000 rounds of PBKDF2 with SHA-512 and identical key lengths regardless of account existence.
   - **Rate Limiting Hardening**: Added `getAuthLimiterOptions()` enforcing strict 10 attempts per 15-minute window in production.
-- **Statistical Benchmark Results (80 randomized, interleaved requests)**:
-  - Employee ID Existent (Mean: 95.2ms, Median: 94.7ms) vs Nonexistent (Mean: 94.3ms, Median: 94.5ms) -> **Median Delta: -0.2ms**.
-  - Email Existent (Mean: 102.9ms, Median: 95.4ms) vs Nonexistent (Mean: 95.2ms, Median: 94.9ms) -> **Median Delta: -0.5ms**.
+- **Statistical Benchmark Results (50 Samples / Condition, 200 Total Trials)**:
+  - Employee ID: Existing (Median: 94.62 ms, Mean: 96.11 ms, P95: 113.68 ms) vs Nonexistent (Median: 93.99 ms, Mean: 94.55 ms, P95: 109.84 ms) -> Mean Diff: -1.56 ms, Median Diff: -0.63 ms, Mean Ratio: 0.984.
+  - Email: Existing (Median: 94.49 ms, Mean: 97.83 ms, P95: 112.56 ms) vs Nonexistent (Median: 94.39 ms, Mean: 94.95 ms, P95: 110.14 ms) -> Mean Diff: -2.88 ms, Median Diff: -0.10 ms, Mean Ratio: 0.971.
+  - Equivalent password-verification work with no practically useful account-existence timing discrepancy observed under the tested conditions.
 - **Verification Evidence**:
   - Unit tests: `server-auth.test.ts` (76/76 passing, including `AUDIT-009-U01`..`U06`).
   - Integration suite: `server-auth-enumeration.test.ts` expanded with `AUDIT-009-T01` through `AUDIT-009-T06` (14/14 passing).
